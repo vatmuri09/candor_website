@@ -13,6 +13,9 @@ from src.interview_session.session_models import Message, MessageType, Participa
 from src.agents.interviewer.interviewer import Interviewer, InterviewerConfig, TTSConfig
 from src.agents.agenda_manager.agenda_manager import AgendaManager, AgendaManagerConfig
 from src.agents.exploration_planner.exploration_planner import ExplorationPlanner, ExplorationPlannerConfig
+from src.agents.engagement.engagement_monitor import EngagementMonitor
+from src.agents.conversation_closer.conversation_closer import ConversationCloser
+from src.agents.context.context_bias import ContextBiasAgent
 from src.agents.user.user_agent import UserAgent
 from src.content.session_agenda.session_agenda import SessionAgenda
 from src.utils.data_process import save_feedback_to_csv
@@ -216,6 +219,33 @@ class InterviewSession:
             config=planner_config,
             interview_session=self
         )
+
+        # Engagement monitor + conversation closer (the two new bots). These are
+        # consulted by the Interviewer at the top of each turn rather than being
+        # pub/sub subscribers, so there is still exactly one interviewer turn.
+        monitor_model = os.getenv("ENGAGEMENT_MONITOR_MODEL_NAME")
+        monitor_cfg = {"user_id": self.user_id}
+        if monitor_model:
+            monitor_cfg["model_name"] = monitor_model
+        self.engagement_monitor = EngagementMonitor(
+            config=monitor_cfg, interview_session=self
+        )
+        self.conversation_closer = ConversationCloser(
+            topic_name=self._interview_description
+        )
+
+        # Context bias agent: evaluates compiled source material for slant so it
+        # is measured (and attributable) rather than silently smuggled into the
+        # interviewer's questions. Does not scrub substance.
+        context_model = os.getenv("CONTEXT_BIAS_MODEL_NAME")
+        context_cfg = {}
+        if context_model:
+            context_cfg["model_name"] = context_model
+        self.context_bias_agent = ContextBiasAgent(
+            config=context_cfg, interview_session=self
+        )
+        # Bias reports produced during this session (persisted with the logs).
+        self.context_bias_reports: List[dict] = []
 
         # Subscriptions of participants to each other
         self._subscriptions: Dict[str, List[Participant]] = {

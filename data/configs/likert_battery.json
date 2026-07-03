@@ -1,0 +1,31 @@
+{
+  "title": "Post-interview questionnaire",
+  "instructions": "A few quick questions about the conversation you just had. There are no right or wrong answers — please answer honestly.",
+  "scale": {
+    "min": 1,
+    "max": 5,
+    "labels": {
+      "1": "Strongly disagree",
+      "2": "Disagree",
+      "3": "Neither agree nor disagree",
+      "4": "Agree",
+      "5": "Strongly agree"
+    }
+  },
+  "likert_items": [
+    { "key": "exp_comfort",      "construct": "experience", "text": "I felt comfortable during this conversation." },
+    { "key": "exp_understood",   "construct": "experience", "text": "The interviewer understood what I was trying to say." },
+    { "key": "exp_voice",        "construct": "experience", "text": "I was able to express my views fully." },
+    { "key": "exp_onesided",     "construct": "experience", "text": "The conversation felt one-sided.", "reverse": true },
+    { "key": "exp_pushed",       "construct": "experience", "text": "I felt the interviewer pushed its own opinions on me.", "reverse": true },
+    { "key": "exp_again",        "construct": "experience", "text": "I would be willing to have a conversation like this again." },
+    { "key": "topic_important",  "construct": "attitude",   "text": "The topic we discussed is personally important to me." },
+    { "key": "topic_strong",     "construct": "attitude",   "text": "I have strong opinions about this topic." },
+    { "key": "topic_stable",     "construct": "attitude",   "text": "My views on this topic are unlikely to change." },
+    { "key": "topic_informed",   "construct": "attitude",   "text": "I feel well-informed about this topic." }
+  ],
+  "open_items": [
+    { "key": "open_main_point",  "text": "In a sentence or two, what is the most important thing you wanted to get across?" },
+    { "key": "open_missed",      "text": "Is there anything you wish the interviewer had asked about?" }
+  ]
+}

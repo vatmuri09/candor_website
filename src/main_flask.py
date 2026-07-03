@@ -25,11 +25,7 @@ from src.utils.speech.text_to_speech import TextToSpeechBase, create_tts_engine
 from src.utils.speech.audio_player import AudioPlayerBase, create_audio_player
 from src.utils.speech.speech_to_text import create_stt_engine
 from src.interview_session.interview_session import InterviewSession
-from src.utils.storage import drive_export
-
-# Second interviewer (vendored from github.com/rdrivers/candor), OpenAI-backed.
-from bots.candor.interviewer import CandorInterviewer
-from bots.candor import prompts as candor_prompts
+from src.utils.storage import session_archive, research_db
 
 load_dotenv(override=True)
 
@@ -180,9 +176,6 @@ active_sessions: Dict[str, SessionWrapper] = {}
 last_messages_by_session: Dict[str, Dict[str, str]] = {}
 session_audio_cache: Dict[str, Dict[str, object]] = {}
 
-# In-memory store for candor interviewer sessions (the second bot).
-candor_sessions: Dict[str, CandorInterviewer] = {}
-
 def create_interview_session(user_id: str, conversation_type: Optional[str] = None,
                              custom_description: Optional[str] = None) -> tuple[InterviewSession, str]:
     """Create an interview session for an anonymous web user + chosen topic."""
@@ -239,35 +232,50 @@ def get_session_wrapper(session_token: str) -> Optional[SessionWrapper]:
     return active_sessions.get(session_token)
 
 def archive_session_wrapper(wrapper: Optional[SessionWrapper]) -> None:
-    """Best-effort export of a finished session's data to Google Drive (once)."""
+    """Best-effort export of a finished session's data to storage (once)."""
     if not wrapper or wrapper.archived:
         return
     wrapper.archived = True
     try:
         session = wrapper.interview_session
         data_dir = os.path.join(os.getenv('DATA_DIR', 'data'), wrapper.user_id)
-        drive_export.archive_session(
+        session_archive.archive_session(
             user_id=wrapper.user_id,
             session_id=getattr(session, 'session_id', 0),
             extra_dirs=[data_dir] if os.path.isdir(data_dir) else None,
         )
     except Exception as e:
-        app.logger.warning(f"Drive archive failed for {wrapper.user_id}: {e}")
+        app.logger.warning(f"Session archive failed for {wrapper.user_id}: {e}")
 
-def write_candor_transcript(dir_user_id: str, candor_bot: CandorInterviewer) -> None:
-    """Write a candor session's transcript as JSON under LOGS_DIR/<dir_user_id>/
-    so it gets picked up by the same Drive archive as the SparkMe session."""
-    out_dir = os.path.join(os.getenv('LOGS_DIR', 'logs'), dir_user_id)
-    os.makedirs(out_dir, exist_ok=True)
-    payload = {
-        'bot': 'candor',
-        'model': getattr(candor_bot, 'model', None),
-        'topic_desc': getattr(candor_bot, 'topic_desc', None),
-        'stats': getattr(candor_bot, 'stats', {}),
-        'transcript': getattr(candor_bot, 'transcript', []),
-    }
-    with open(os.path.join(out_dir, 'candor_transcript.json'), 'w', encoding='utf-8') as f:
-        json.dump(payload, f, indent=2)
+    # Record structured session metadata to the research DB (best-effort).
+    try:
+        record_session_metadata(wrapper)
+    except Exception as e:
+        app.logger.warning(f"DB record_session failed for {wrapper.user_id}: {e}")
+
+
+def record_session_metadata(wrapper: SessionWrapper) -> None:
+    """Write one session's metadata row to the research DB (Vercel Postgres)."""
+    if not research_db.is_configured():
+        return
+    session = wrapper.interview_session
+    monitor = getattr(session, 'engagement_monitor', None)
+    closer = getattr(session, 'conversation_closer', None)
+    chat = getattr(session, 'chat_history', []) or []
+    num_user = len([m for m in chat if getattr(m, 'role', None) == 'User'])
+    num_interviewer = len([m for m in chat if getattr(m, 'role', None) == 'Interviewer'])
+    research_db.record_session(
+        user_id=wrapper.user_id,
+        session_id=getattr(session, 'session_id', 0),
+        conversation_type=wrapper.conversation_type,
+        topic=getattr(session, '_interview_description', None),
+        num_user_turns=num_user,
+        num_interviewer_turns=num_interviewer,
+        end_reason=getattr(closer, 'state', None),
+        engagement_stats=monitor.stats() if monitor is not None else None,
+        closer_stats=closer.stats() if closer is not None else None,
+        context_bias=getattr(session, 'context_bias_reports', None),
+    )
 
 # =============================================================================
 # PAGE ROUTES - PUBLIC (no login; the user just picks a conversation type)
@@ -286,16 +294,6 @@ def index():
 def unified_chat():
     """Unified chat interface. Session is created via /api/start-session."""
     return render_template('chat.html')
-
-@app.route('/compare')
-def compare():
-    """Split-screen: the SparkMe interviewer and the candor interviewer,
-    same topic, side by side."""
-    types = [
-        {"key": key, **{k: v for k, v in cfg.items() if k not in ("description", "plan_file")}}
-        for key, cfg in CONVERSATION_TYPES.items()
-    ]
-    return render_template('compare.html', conversation_types=types)
 
 # =============================================================================
 # API ENDPOINTS - PROTECTED (REQUIRE LOGIN)
@@ -667,6 +665,108 @@ def end_session():
         'user_id': session.user_id
     })
 
+# =============================================================================
+# POST-INTERVIEW SURVEY (fixed validated Likert battery)
+# =============================================================================
+
+_BATTERY_CACHE = None
+
+
+def _load_battery() -> dict:
+    """Load the fixed post-interview battery from config (cached)."""
+    global _BATTERY_CACHE
+    if _BATTERY_CACHE is not None:
+        return _BATTERY_CACHE
+    path = os.getenv('LIKERT_BATTERY_PATH',
+                     os.path.join(os.getenv('DATA_DIR', 'data'), 'configs', 'likert_battery.json'))
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            _BATTERY_CACHE = json.load(f)
+    except Exception as e:
+        app.logger.warning(f"Could not load Likert battery from {path}: {e}")
+        _BATTERY_CACHE = {"title": "", "scale": {}, "likert_items": [], "open_items": []}
+    return _BATTERY_CACHE
+
+
+@app.route('/api/survey/battery', methods=['GET'])
+def survey_battery():
+    """Return the fixed post-interview questionnaire for the frontend to render."""
+    return jsonify({'success': True, 'battery': _load_battery()})
+
+
+@app.route('/api/survey/submit', methods=['POST'])
+def survey_submit():
+    """Persist a respondent's post-interview Likert + open-ended answers.
+
+    Body: { session_token, likert: {item_key: value, ...}, open: {item_key: text, ...} }
+    Answers are written both to the research DB (tidy rows) and to the session's
+    log dir (so they travel with the zip archive).
+    """
+    data = request.json or {}
+    session_token = data.get('session_token')
+    wrapper = get_session_wrapper(session_token)
+    if not wrapper:
+        return jsonify({'success': False, 'error': 'Invalid or expired session'}), 400
+
+    session = wrapper.interview_session
+    session_id = getattr(session, 'session_id', 0)
+    battery = _load_battery()
+    scale = battery.get('scale', {})
+    scale_min, scale_max = scale.get('min'), scale.get('max')
+    labels = scale.get('labels', {})
+
+    likert_in = data.get('likert', {}) or {}
+    open_in = data.get('open', {}) or {}
+
+    likert_rows, open_rows = [], []
+    for item in battery.get('likert_items', []):
+        key = item.get('key')
+        if key not in likert_in or likert_in[key] in (None, ''):
+            continue
+        try:
+            val = int(likert_in[key])
+        except (TypeError, ValueError):
+            continue
+        likert_rows.append({
+            'item_key': key, 'item_text': item.get('text'),
+            'scale_min': scale_min, 'scale_max': scale_max,
+            'response': val, 'response_label': labels.get(str(val)),
+        })
+    for item in battery.get('open_items', []):
+        key = item.get('key')
+        text = (open_in.get(key) or '').strip()
+        if not text:
+            continue
+        open_rows.append({'item_key': key, 'item_text': item.get('text'), 'response': text})
+
+    # Persist to the research DB (best-effort).
+    try:
+        record_session_metadata(wrapper)  # ensure the parent session row exists
+        research_db.record_likert(wrapper.user_id, session_id, likert_rows)
+        research_db.record_open(wrapper.user_id, session_id, open_rows)
+    except Exception as e:
+        app.logger.warning(f"survey DB write failed for {wrapper.user_id}: {e}")
+
+    # Persist to the session log dir so it travels with the zip archive.
+    try:
+        logs_dir = os.path.join(os.getenv('LOGS_DIR', 'logs'), wrapper.user_id)
+        os.makedirs(logs_dir, exist_ok=True)
+        with open(os.path.join(logs_dir, f'survey_session_{session_id}.json'), 'w', encoding='utf-8') as f:
+            json.dump({'likert': likert_rows, 'open': open_rows,
+                       'submitted_at': time.time()}, f, indent=2)
+    except Exception as e:
+        app.logger.warning(f"survey file write failed for {wrapper.user_id}: {e}")
+
+    # Re-archive so the survey answers are included in the uploaded zip.
+    try:
+        wrapper.archived = False
+        archive_session_wrapper(wrapper)
+    except Exception as e:
+        app.logger.warning(f"re-archive after survey failed for {wrapper.user_id}: {e}")
+
+    return jsonify({'success': True, 'recorded': {'likert': len(likert_rows), 'open': len(open_rows)}})
+
+
 @app.route('/api/session-status', methods=['GET'])
 def session_status():
     """Get current session status including background task progress"""
@@ -819,121 +919,6 @@ def get_last_messages():
         'user_message': msgs.get('user_message', ''),
         'bot_reply': msgs.get('bot_reply', '')
     })
-
-# =============================================================================
-# CANDOR INTERVIEWER (second bot) — simple turn-by-turn endpoints
-# =============================================================================
-
-@app.route('/api/candor/start', methods=['POST'])
-def candor_start():
-    """Start a candor interview on the same topic used for SparkMe.
-
-    Body: { conversation_type, custom_description } (same shape as start-session).
-    Returns a candor_token and the interviewer's first question.
-    """
-    data = request.get_json(silent=True) or {}
-    conversation_type = data.get('conversation_type') or DEFAULT_CONVERSATION_TYPE
-    custom_description = data.get('custom_description')
-
-    # Use the SAME topic text SparkMe gets, so both bots interview on one topic.
-    description, _ = resolve_conversation(conversation_type, custom_description)
-    topic_desc = candor_prompts.topic_desc_from_text(description)
-
-    try:
-        bot = CandorInterviewer(topic_desc)
-        question, flags = bot.first_question()
-    except Exception as e:
-        app.logger.error(f"candor start failed: {e}", exc_info=True)
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-    token = str(uuid.uuid4())
-    candor_sessions[token] = bot
-    return jsonify({
-        'success': True,
-        'candor_token': token,
-        'question': question,
-        'flags': flags,
-    })
-
-
-@app.route('/api/candor/message', methods=['POST'])
-def candor_message():
-    """Send the user's answer to candor; returns its next question."""
-    data = request.get_json(silent=True) or {}
-    token = data.get('candor_token')
-    message = (data.get('message') or '').strip()
-
-    bot = candor_sessions.get(token)
-    if not bot:
-        return jsonify({'success': False, 'error': 'Invalid or expired candor session'}), 400
-    if not message:
-        return jsonify({'success': False, 'error': 'Empty message'}), 400
-
-    try:
-        question, flags = bot.answer(message)
-    except Exception as e:
-        app.logger.error(f"candor message failed: {e}", exc_info=True)
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-    return jsonify({
-        'success': True,
-        'question': question,
-        'flags': flags,
-        'stats': bot.stats,
-    })
-
-
-@app.route('/api/candor/end', methods=['POST'])
-def candor_end():
-    """Drop a candor session from memory (best-effort)."""
-    data = request.get_json(silent=True) or {}
-    token = data.get('candor_token')
-    candor_sessions.pop(token, None)
-    return jsonify({'success': True})
-
-
-@app.route('/api/compare/end', methods=['POST'])
-def compare_end():
-    """End a side-by-side comparison and archive BOTH transcripts to Drive.
-
-    candor's transcript is written into the SparkMe user's log folder, then the
-    SparkMe session is ended and archived — so both land in one Drive zip.
-    """
-    data = request.get_json(silent=True) or {}
-    spark_token = data.get('session_token')
-    candor_token = data.get('candor_token')
-
-    wrapper = get_session_wrapper(spark_token)
-    candor_bot = candor_sessions.get(candor_token)
-
-    if wrapper:
-        # Fold candor's transcript in beside SparkMe's logs before archiving.
-        if candor_bot:
-            try:
-                write_candor_transcript(wrapper.user_id, candor_bot)
-            except Exception as e:
-                app.logger.warning(f"could not write candor transcript: {e}")
-        try:
-            wrapper.interview_session.end_session()
-        except Exception as e:
-            app.logger.warning(f"ending SparkMe session failed: {e}")
-        archive_session_wrapper(wrapper)  # zips logs (now incl. candor) -> Drive
-    elif candor_bot:
-        # No SparkMe session (edge case) — archive candor on its own.
-        pseudo_id = f"candor_{candor_token[:12]}"
-        try:
-            write_candor_transcript(pseudo_id, candor_bot)
-            drive_export.archive_session(user_id=pseudo_id, session_id=0)
-        except Exception as e:
-            app.logger.warning(f"candor-only archive failed: {e}")
-
-    candor_sessions.pop(candor_token, None)
-    return jsonify({
-        'success': True,
-        'archived': bool(wrapper or candor_bot),
-        'drive_configured': drive_export.is_configured(),
-    })
-
 
 # =============================================================================
 # HEALTH CHECK - NOT PROTECTED (for monitoring)

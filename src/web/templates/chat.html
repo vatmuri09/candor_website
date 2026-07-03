@@ -222,6 +222,126 @@
             };
         }
 
+        // ===================================================================
+        // SESSION COMPLETION + POST-INTERVIEW SURVEY
+        // ===================================================================
+        let completionHandled = false;
+
+        function onSessionCompleted() {
+            if (completionHandled) return;
+            completionHandled = true;
+            updateStatus('Session completed');
+            isSessionCompleted = true;
+            updateEndSessionButton();
+            disableChatInputs();
+            if (pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
+            // Keep the session token until the survey is submitted (the survey
+            // endpoint needs it), then clear it and offer a fresh start.
+            showSurvey();
+        }
+
+        function finishAfterSurvey() {
+            sessionStorage.removeItem('candor_session_token');
+            showStartOver();
+        }
+
+        async function showSurvey() {
+            if (document.getElementById('survey-panel')) return;
+            let battery;
+            try {
+                const resp = await fetch('/api/survey/battery');
+                battery = (await resp.json()).battery;
+            } catch (e) {
+                console.error('Could not load survey', e);
+                finishAfterSurvey();
+                return;
+            }
+            if (!battery || !((battery.likert_items || []).length + (battery.open_items || []).length)) {
+                finishAfterSurvey();
+                return;
+            }
+
+            const scale = battery.scale || {};
+            const labels = scale.labels || {};
+            const min = scale.min || 1, max = scale.max || 5;
+
+            const panel = document.createElement('div');
+            panel.id = 'survey-panel';
+            panel.style.cssText = 'max-width:720px;margin:24px auto;padding:24px;background:#fff;border:1px solid #e2e2e2;border-radius:10px;box-shadow:0 2px 12px rgba(0,0,0,0.06);';
+
+            let html = `<h2 style="margin-top:0;font-size:20px;">${battery.title || 'Post-interview questionnaire'}</h2>`;
+            if (battery.instructions) html += `<p style="color:#555;font-size:14px;">${battery.instructions}</p>`;
+
+            // Likert items
+            (battery.likert_items || []).forEach(item => {
+                html += `<div class="survey-item" style="margin:18px 0;padding-bottom:12px;border-bottom:1px solid #f0f0f0;">
+                    <div style="font-weight:600;margin-bottom:10px;">${item.text}</div>
+                    <div style="display:flex;gap:6px;flex-wrap:wrap;">`;
+                for (let v = min; v <= max; v++) {
+                    const lbl = labels[String(v)] || v;
+                    html += `<label style="flex:1;min-width:90px;text-align:center;font-size:12px;color:#444;cursor:pointer;border:1px solid #ddd;border-radius:6px;padding:8px 4px;">
+                        <input type="radio" name="likert_${item.key}" value="${v}" style="display:block;margin:0 auto 4px;">${lbl}</label>`;
+                }
+                html += `</div></div>`;
+            });
+
+            // Open-ended items
+            (battery.open_items || []).forEach(item => {
+                html += `<div class="survey-item" style="margin:18px 0;">
+                    <div style="font-weight:600;margin-bottom:8px;">${item.text}</div>
+                    <textarea name="open_${item.key}" rows="3" style="width:100%;box-sizing:border-box;border:1px solid #ddd;border-radius:6px;padding:8px;font-family:inherit;font-size:14px;"></textarea>
+                </div>`;
+            });
+
+            html += `<div id="survey-error" style="color:#c0392b;font-size:13px;margin:8px 0;display:none;"></div>
+                <div style="display:flex;gap:12px;margin-top:16px;">
+                    <button id="survey-submit" style="background:#667eea;color:#fff;padding:12px 24px;border:none;border-radius:6px;cursor:pointer;font-size:15px;font-weight:600;">Submit</button>
+                    <button id="survey-skip" style="background:transparent;color:#888;padding:12px 16px;border:none;cursor:pointer;font-size:14px;">Skip</button>
+                </div>`;
+            panel.innerHTML = html;
+
+            const container = document.querySelector('.chat-container') || document.body;
+            container.appendChild(panel);
+            panel.scrollIntoView({ behavior: 'smooth' });
+
+            document.getElementById('survey-skip').onclick = () => { panel.remove(); finishAfterSurvey(); };
+            document.getElementById('survey-submit').onclick = () => submitSurvey(battery, panel);
+        }
+
+        async function submitSurvey(battery, panel) {
+            const likert = {}, open = {};
+            let answered = 0;
+            (battery.likert_items || []).forEach(item => {
+                const sel = panel.querySelector(`input[name="likert_${item.key}"]:checked`);
+                if (sel) { likert[item.key] = parseInt(sel.value, 10); answered++; }
+            });
+            (battery.open_items || []).forEach(item => {
+                const ta = panel.querySelector(`textarea[name="open_${item.key}"]`);
+                if (ta && ta.value.trim()) open[item.key] = ta.value.trim();
+            });
+
+            if (answered === 0 && Object.keys(open).length === 0) {
+                const err = document.getElementById('survey-error');
+                err.textContent = 'Please answer at least one question, or click Skip.';
+                err.style.display = 'block';
+                return;
+            }
+
+            const btn = document.getElementById('survey-submit');
+            btn.disabled = true; btn.textContent = 'Submitting…';
+            try {
+                await fetch('/api/survey/submit', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_token: sessionToken, likert, open }),
+                });
+            } catch (e) {
+                console.error('Survey submit failed', e);
+            }
+            panel.innerHTML = '<p style="text-align:center;padding:20px;font-size:16px;">Thank you — your responses have been recorded.</p>';
+            finishAfterSurvey();
+        }
+
         function showStartOver() {
             if (document.getElementById('start-over-btn')) return;
             const panel = document.querySelector('.control-panel');
@@ -380,18 +500,7 @@
                 }
 
                 if (data.session_completed) {
-                    updateStatus('Session completed');
-                    isSessionCompleted = true;
-                    updateEndSessionButton();
-                    disableChatInputs();
-                    sessionStorage.removeItem('candor_session_token');
-                    showStartOver();
-
-                    // Stop polling
-                    if (pollingInterval) {
-                        clearInterval(pollingInterval);
-                        pollingInterval = null;
-                    }
+                    onSessionCompleted();
                 }
             } catch (error) {
                 console.error('Polling error', error);
@@ -612,16 +721,7 @@
                 
                 if (result.success) {
                     updateStatus('Session ended. Thank you for participating!');
-                    isSessionCompleted = true;
-                    updateEndSessionButton();
-                    disableChatInputs();
-                    sessionStorage.removeItem('candor_session_token');
-                    showStartOver();
-
-                    if (pollingInterval) {
-                        clearInterval(pollingInterval);
-                        pollingInterval = null;
-                    }
+                    onSessionCompleted();
                 } else {
                     updateStatus('Failed to end session: ' + (result.error || 'Unknown error'));
                 }

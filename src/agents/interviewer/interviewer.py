@@ -8,6 +8,9 @@ from src.agents.base_agent import BaseAgent
 from src.agents.interviewer.prompts import get_prompt
 from src.agents.interviewer.tools import RespondToUser
 from src.agents.shared.memory_tools import Recall
+from src.agents.shared.anti_sycophancy import (
+    inspect_turn, sanitize_interviewer_turn, regen_reminder,
+)
 from src.utils.llm.prompt_utils import format_prompt
 from src.interview_session.session_models import Participant, Message
 
@@ -60,24 +63,160 @@ class Interviewer(BaseAgent, Participant):
         }
 
         self._turn_to_respond = False
+        # A one-turn instruction the ConversationCloser can inject (e.g. pivot note).
+        self._pending_directive_note = ""
+        # Running tally of guardrail interventions, persisted with the session for research.
+        self.guardrail_stats = {
+            "affirmation": 0, "closing": 0,
+            "stance": 0, "advice": 0, "no_question": 0,
+            "regenerated": 0, "regeneration_failed": 0,
+        }
 
     async def _handle_response(self, response: str, subtopic_id: str = "") -> str:
         """Handle responses from the RespondToUser tool and adding them to chat history.
-        
+
+        Enforces the non-affirming stance before anything reaches the respondent:
+        strips sycophancy deterministically, and if a hard guardrail is tripped
+        (no question / stated stance / advice) regenerates the turn once.
+
         Args:
             response: The response text to add to chat history
-            topic_id: The topic ID of the response
             subtopic_id: The subtopic ID of the response
         """
+        clean = await self._enforce_non_affirming(response)
+
         self.interview_session.add_message_to_chat_history(
             role=self.title,
-            content=response,
+            content=clean,
             metadata={'subtopic_id': str(subtopic_id)},
         )
         self.add_event(sender=self.name, tag="message",
-                       content=response)
+                       content=clean)
 
-        return response
+        return clean
+
+    async def _enforce_non_affirming(self, response: str) -> str:
+        """Sanitize + guardrail a generated turn. Returns respondent-safe text."""
+        inspection = inspect_turn(response)
+        for f in inspection.flags:
+            self.guardrail_stats[f] = self.guardrail_stats.get(f, 0) + 1
+
+        if not inspection.needs_regeneration:
+            return inspection.clean_text
+
+        for v in inspection.violations:
+            self.guardrail_stats[v] = self.guardrail_stats.get(v, 0) + 1
+        SessionLogger.log_to_file(
+            "execution_log",
+            f"[GUARDRAIL] Interviewer turn tripped {inspection.violations}; regenerating. "
+            f"Draft: {inspection.clean_text!r}"
+        )
+
+        regenerated = await self._regenerate_question(
+            inspection.clean_text, inspection.violations
+        )
+        if regenerated:
+            self.guardrail_stats["regenerated"] += 1
+            regen_clean, _ = sanitize_interviewer_turn(regenerated)
+            # If the regeneration still has no question, fall back rather than loop.
+            recheck = inspect_turn(regen_clean)
+            if not recheck.violations:
+                return recheck.clean_text
+            SessionLogger.log_to_file(
+                "execution_log",
+                f"[GUARDRAIL] Regeneration still tripped {recheck.violations}; using it anyway."
+            )
+            return regen_clean
+
+        self.guardrail_stats["regeneration_failed"] += 1
+        return inspection.clean_text
+
+    async def _regenerate_question(self, bad_draft: str, violations: list) -> str:
+        """One focused LLM call that rewrites a guardrail-failing turn as a bare question.
+
+        Uses a compact plain-text prompt (not the tool format) so no XML parsing is
+        needed, and only runs when a violation is detected — normally never.
+        """
+        recent = self.get_event_stream_str(
+            [
+                {"sender": "Interviewer", "tag": "message"},
+                {"sender": "User", "tag": "message"},
+            ],
+            as_list=True,
+        )
+        recent_ctx = "\n".join(recent[-6:])
+        prompt = (
+            "You are a strictly non-affirming research interviewer.\n"
+            f"The topic is: {self.interview_description}.\n\n"
+            "Recent conversation:\n"
+            f"{recent_ctx}\n\n"
+            f"You drafted this next turn: \"{bad_draft}\"\n"
+            f"{regen_reminder(violations)}\n\n"
+            "Output ONLY the single rewritten question, with no preamble, no quotes, "
+            "no acknowledgment, and no tool tags."
+        )
+        try:
+            out = await self.call_engine_async(prompt)
+            return (out or "").strip()
+        except Exception as e:
+            SessionLogger.log_to_file(
+                "execution_log", f"[GUARDRAIL] Regeneration call failed: {e}"
+            )
+            return ""
+
+    async def _run_conversation_director(self, message: Message) -> bool:
+        """Let the EngagementMonitor + ConversationCloser steer this turn.
+
+        Returns True if a scripted turn was emitted (or the session ended) and the
+        interviewer should NOT generate a normal question this turn.
+        """
+        session = self.interview_session
+        monitor = getattr(session, "engagement_monitor", None)
+        closer = getattr(session, "conversation_closer", None)
+        if monitor is None or closer is None:
+            return False  # subagents not wired (e.g. eval harness) -> normal flow
+
+        user_answer = message.content if (message and message.role == "User") else None
+        if user_answer is not None:
+            monitor.observe(user_answer)
+
+        turn_count = len([m for m in session.chat_history if m.role == "User"])
+        transcript_tail = "\n".join(
+            self.get_event_stream_str(
+                [{"sender": "Interviewer", "tag": "message"},
+                 {"sender": "User", "tag": "message"}],
+                as_list=True,
+            )[-8:]
+        )
+
+        try:
+            directive = await closer.direct(user_answer, monitor, transcript_tail, turn_count)
+        except Exception as e:
+            SessionLogger.log_to_file("execution_log", f"[CLOSER] direct() failed: {e}")
+            return False
+
+        if directive.action == "normal":
+            # A pivot note (respondent chose to continue) rides along with the prompt.
+            self._pending_directive_note = directive.resume_note or ""
+            return False
+
+        SessionLogger.log_to_file(
+            "execution_log",
+            f"[CLOSER] action={directive.action} reason={directive.reason}"
+        )
+
+        if directive.action == "end_now":
+            # Optionally deliver a brief closing line, then end the session.
+            if directive.text:
+                await self._handle_response(directive.text)
+            self._turn_to_respond = False
+            session.end_session()
+            return True
+
+        # scripted_offer or scripted_wind_down: deliver the scripted line as this turn.
+        self._turn_to_respond = False
+        await self._handle_response(directive.text)
+        return True
 
     async def on_message(self, message: Message):
 
@@ -88,7 +227,13 @@ class Interviewer(BaseAgent, Participant):
             )
             self.add_event(sender=message.role, tag="message",
                            content=message.content)
-        
+
+        # Consult the engagement monitor + conversation closer BEFORE generating.
+        # If they dictate a scripted turn (check-in, wind-down, or hard end), we
+        # emit that instead of a normal question.
+        if await self._run_conversation_director(message):
+            return
+
         self._turn_to_respond = True
         iterations = 0
 
@@ -192,7 +337,14 @@ class Interviewer(BaseAgent, Participant):
                 main_prompt = main_prompt.replace("\n{STRATEGIC_QUESTIONS}\n", "\n")
                 # Don't provide strategic_questions key in format_params (already omitted above)
 
-        return format_prompt(main_prompt, format_params)
+        prompt = format_prompt(main_prompt, format_params)
+
+        # One-turn directive from the ConversationCloser (e.g. mandatory pivot on resume).
+        if self._pending_directive_note:
+            prompt = f"{prompt}\n{self._pending_directive_note}"
+            self._pending_directive_note = ""
+
+        return prompt
 
     def _format_strategic_questions(self) -> str:
         """

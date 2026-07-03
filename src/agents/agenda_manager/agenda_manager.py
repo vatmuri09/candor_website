@@ -115,6 +115,31 @@ class AgendaManager(BaseAgent, Participant):
                 "execution_log", f"[RUN] Found initial context to be initialized with, preparing an optimized session!"
             )
 
+            # Evaluate the compiled context for bias BEFORE it seeds the agenda.
+            # We keep the original for provenance and, when the LLM layer returns
+            # a neutralized rewrite, feed that (slant attributed/removed, detail
+            # preserved) to the downstream agenda-building instead.
+            bias_agent = getattr(self.interview_session, "context_bias_agent", None)
+            if bias_agent is not None:
+                try:
+                    report = await bias_agent.report(additional_context, use_llm=True)
+                    report["source_path"] = additional_context_path
+                    self.interview_session.context_bias_reports.append(report)
+                    neutralized = (report.get("llm") or {}).get("neutralized_context")
+                    # Only substitute when the material is meaningfully slanted;
+                    # otherwise keep the original verbatim to avoid needless drift.
+                    if neutralized and report.get("slant_score", 0) >= 0.4:
+                        SessionLogger.log_to_file(
+                            "execution_log",
+                            f"[CONTEXT_BIAS] slant={report.get('slant_score')} >= 0.4; "
+                            f"using neutralized context for agenda seeding."
+                        )
+                        additional_context = neutralized
+                except Exception as e:
+                    SessionLogger.log_to_file(
+                        "execution_log", f"[CONTEXT_BIAS] analysis skipped: {e}"
+                    )
+
             # Get user portrait and last meeting summary
             await asyncio.gather(
                 self.interview_session.agenda_manager._update_user_portrait(
