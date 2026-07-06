@@ -1,22 +1,12 @@
-"""
-Vercel Blob upload backend.
+"""Upload finished-interview zip archives to Vercel Blob.
 
-Replaces Google Drive as the destination for finished-interview zip archives.
-Uses the Vercel Blob REST API directly (a single PUT with the store's
-read-write token) so we don't pull in an extra SDK — `requests` is already a
-dependency.
+We just do a single PUT against the Blob REST API with the store token instead of
+adding the Vercel SDK, since we already have `requests`.
 
-Env:
-  BLOB_READ_WRITE_TOKEN   -> the store's read/write token (Vercel dashboard >
-                             Storage > your Blob store > ".env.local" tab, or
-                             `vercel env pull`). Required.
-  VERCEL_BLOB_PREFIX      -> optional key prefix/folder inside the store
-                             (default "interviews").
-  VERCEL_BLOB_API_VERSION -> optional override of the x-api-version header
-                             (default "7").
-
-Docs: https://vercel.com/docs/storage/vercel-blob  (REST usage mirrors the
-`@vercel/blob` `put()` call).
+Env vars:
+  BLOB_READ_WRITE_TOKEN   - the store's read/write token (required)
+  VERCEL_BLOB_PREFIX      - folder inside the store (default "interviews")
+  VERCEL_BLOB_API_VERSION - x-api-version header (default "7")
 """
 import io
 import logging

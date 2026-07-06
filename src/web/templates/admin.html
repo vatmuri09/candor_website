@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Interviews</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #f4f4f5; color: #111827; }
+    header { background: #111827; color: #fff; padding: 16px 24px; display: flex;
+             justify-content: space-between; align-items: center; }
+    header a { color: #cbd5e1; font-size: 14px; }
+    .wrap { padding: 24px; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px;
+            overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+    th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid #eee; font-size: 14px; }
+    th { background: #f9fafb; }
+    tr:hover { background: #f9fafb; }
+    a.row { color: #2563eb; text-decoration: none; }
+    .empty { color: #6b7280; padding: 24px 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Stored interviews</strong>
+    <a href="{{ url_for('admin_logout') }}">Log out</a>
+  </header>
+  <div class="wrap">
+    {% if sessions %}
+    <table>
+      <tr>
+        <th>When</th><th>User</th><th>Type</th><th>Topic</th>
+        <th>User turns</th><th>End reason</th><th></th>
+      </tr>
+      {% for s in sessions %}
+      <tr>
+        <td>{{ s.created_at }}</td>
+        <td>{{ s.user_id }}</td>
+        <td>{{ s.conversation_type }}</td>
+        <td>{{ s.topic }}</td>
+        <td>{{ s.num_user_turns }}</td>
+        <td>{{ s.end_reason }}</td>
+        <td><a class="row" href="{{ url_for('admin_session', row_id=s.id) }}">view</a></td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <p class="empty">No interviews recorded yet.</p>
+    {% endif %}
+  </div>
+</body>
+</html>

@@ -1,22 +1,10 @@
-"""
-Research database (Vercel Postgres / Neon).
+"""Postgres storage for session metadata and post-interview survey answers.
 
-Structured, queryable home for the data we actually want to model later:
-per-session metadata and the post-interview Likert battery. The zip archives
-(full transcripts/logs) still go to Vercel Blob; this DB is the tidy layer for
-"predict the respondent's answers from the conversation".
-
-Connection (any one of these, checked in order):
-  POSTGRES_URL            -> Vercel Postgres pooled URL (preferred on Vercel)
-  POSTGRES_PRISMA_URL     -> Vercel Postgres pooled URL (alt name)
-  DATABASE_URL            -> generic Postgres URL (local / other hosts)
-
-If none is set, every function here is a no-op, so the app runs fine with no DB.
-
-Schema is created on first use (idempotent). Two tables:
-  interview_sessions  -> one row per finished session (metadata + agent stats)
-  likert_responses    -> one row per Likert item answered (tidy/long format)
-  open_responses      -> one row per open-ended free-text answer
+The full transcripts/zips go to Vercel Blob; this is the structured table layer.
+Connection URL comes from POSTGRES_URL, POSTGRES_PRISMA_URL, or DATABASE_URL (in
+that order). If none is set, everything here quietly does nothing so the app still
+runs. Tables are created on first use: interview_sessions, likert_responses, and
+open_responses.
 """
 import json
 import logging
@@ -79,6 +67,7 @@ _DDL = [
         engagement_stats      JSONB,
         closer_stats          JSONB,
         context_bias          JSONB,
+        transcript            JSONB,
         archive_url           TEXT,
         created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
         UNIQUE (user_id, session_id)
@@ -111,6 +100,19 @@ _DDL = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_likert_user_session ON likert_responses (user_id, session_id)",
     "CREATE INDEX IF NOT EXISTS idx_open_user_session ON open_responses (user_id, session_id)",
+    # Live web sessions: the working state we reload between turns so the app can
+    # run on serverless (no in-memory session dict). One row per active session.
+    """
+    CREATE TABLE IF NOT EXISTS web_sessions (
+        token       TEXT PRIMARY KEY,
+        meta        JSONB,
+        state       JSONB,
+        files       BYTEA,
+        outbox      JSONB NOT NULL DEFAULT '[]',
+        status      TEXT NOT NULL DEFAULT 'in_progress',
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
 ]
 
 
@@ -135,7 +137,8 @@ def record_session(user_id: str, session_id, *, conversation_type: str = None,
                    ended_at: datetime = None, num_user_turns: int = None,
                    num_interviewer_turns: int = None, end_reason: str = None,
                    engagement_stats: dict = None, closer_stats: dict = None,
-                   context_bias: list = None, archive_url: str = None) -> None:
+                   context_bias: list = None, transcript: list = None,
+                   archive_url: str = None) -> None:
     """Upsert one session's metadata. Best-effort; never raises."""
     engine = _get_engine()
     if engine is None or not _ensure_schema(engine):
@@ -146,12 +149,12 @@ def record_session(user_id: str, session_id, *, conversation_type: str = None,
             INSERT INTO interview_sessions
                 (user_id, session_id, conversation_type, topic, started_at, ended_at,
                  num_user_turns, num_interviewer_turns, end_reason,
-                 engagement_stats, closer_stats, context_bias, archive_url)
+                 engagement_stats, closer_stats, context_bias, transcript, archive_url)
             VALUES
                 (:user_id, :session_id, :conversation_type, :topic, :started_at, :ended_at,
                  :num_user_turns, :num_interviewer_turns, :end_reason,
                  CAST(:engagement_stats AS JSONB), CAST(:closer_stats AS JSONB),
-                 CAST(:context_bias AS JSONB), :archive_url)
+                 CAST(:context_bias AS JSONB), CAST(:transcript AS JSONB), :archive_url)
             ON CONFLICT (user_id, session_id) DO UPDATE SET
                 conversation_type = EXCLUDED.conversation_type,
                 topic = EXCLUDED.topic,
@@ -163,6 +166,7 @@ def record_session(user_id: str, session_id, *, conversation_type: str = None,
                 engagement_stats = EXCLUDED.engagement_stats,
                 closer_stats = EXCLUDED.closer_stats,
                 context_bias = EXCLUDED.context_bias,
+                transcript = EXCLUDED.transcript,
                 archive_url = EXCLUDED.archive_url
         """)
         with engine.begin() as conn:
@@ -176,6 +180,7 @@ def record_session(user_id: str, session_id, *, conversation_type: str = None,
                 "engagement_stats": json.dumps(engagement_stats) if engagement_stats is not None else None,
                 "closer_stats": json.dumps(closer_stats) if closer_stats is not None else None,
                 "context_bias": json.dumps(context_bias) if context_bias is not None else None,
+                "transcript": json.dumps(transcript) if transcript is not None else None,
                 "archive_url": archive_url,
             })
     except Exception as e:
@@ -231,3 +236,143 @@ def record_open(user_id: str, session_id, responses: List[dict]) -> None:
             conn.execute(stmt, rows)
     except Exception as e:
         logger.warning(f"record_open failed for {user_id}/{session_id}: {e}")
+
+
+# ---- live web sessions (working state kept between turns) ----
+
+def save_web_session(token: str, meta: dict, state: dict, files: bytes,
+                     outbox: list, status: str) -> bool:
+    """Store/replace a live session's working state. Returns True on success."""
+    engine = _get_engine()
+    if engine is None or not _ensure_schema(engine):
+        return False
+    try:
+        from sqlalchemy import text
+        stmt = text("""
+            INSERT INTO web_sessions (token, meta, state, files, outbox, status, updated_at)
+            VALUES (:token, CAST(:meta AS JSONB), CAST(:state AS JSONB), :files,
+                    CAST(:outbox AS JSONB), :status, now())
+            ON CONFLICT (token) DO UPDATE SET
+                meta = EXCLUDED.meta, state = EXCLUDED.state, files = EXCLUDED.files,
+                outbox = EXCLUDED.outbox, status = EXCLUDED.status, updated_at = now()
+        """)
+        with engine.begin() as conn:
+            conn.execute(stmt, {"token": token, "meta": json.dumps(meta),
+                                "state": json.dumps(state), "files": files,
+                                "outbox": json.dumps(outbox), "status": status})
+        return True
+    except Exception as e:
+        logger.warning(f"save_web_session failed for {token}: {e}")
+        return False
+
+
+def read_and_clear_outbox(token: str):
+    """Return (messages, status) for a token and empty its outbox. Cheap poll path."""
+    engine = _get_engine()
+    if engine is None or not _ensure_schema(engine):
+        return None
+    try:
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT outbox, status FROM web_sessions WHERE token = :t"),
+                {"t": token},
+            ).fetchone()
+            if row is None:
+                return None
+            outbox, status = row
+            if outbox:
+                conn.execute(
+                    text("UPDATE web_sessions SET outbox = '[]' WHERE token = :t"),
+                    {"t": token},
+                )
+        return (outbox or []), status
+    except Exception as e:
+        logger.warning(f"read_and_clear_outbox failed for {token}: {e}")
+        return None
+
+
+def get_web_session(token: str):
+    """Return (meta, state, files) for a token, or None if not found."""
+    engine = _get_engine()
+    if engine is None or not _ensure_schema(engine):
+        return None
+    try:
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT meta, state, files FROM web_sessions WHERE token = :t"),
+                {"t": token},
+            ).fetchone()
+        if row is None:
+            return None
+        meta, state, files = row
+        files = bytes(files) if files is not None else b""
+        return meta, state, files
+    except Exception as e:
+        logger.warning(f"get_web_session failed for {token}: {e}")
+        return None
+
+
+# ---- admin read helpers ----
+
+def list_sessions(limit: int = 200) -> list:
+    """All finished sessions, newest first, for the admin list page."""
+    engine = _get_engine()
+    if engine is None or not _ensure_schema(engine):
+        return []
+    try:
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            rows = conn.execute(text("""
+                SELECT id, user_id, session_id, conversation_type, topic,
+                       num_user_turns, end_reason, created_at
+                FROM interview_sessions
+                ORDER BY created_at DESC
+                LIMIT :lim
+            """), {"lim": limit}).mappings().all()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.warning(f"list_sessions failed: {e}")
+        return []
+
+
+def get_session_detail(row_id: int):
+    """One session's full record + its Likert / open answers, for the admin page."""
+    engine = _get_engine()
+    if engine is None or not _ensure_schema(engine):
+        return None
+    try:
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            session = conn.execute(
+                text("SELECT * FROM interview_sessions WHERE id = :id"),
+                {"id": row_id}).mappings().fetchone()
+            if session is None:
+                return None
+            session = dict(session)
+            likert = conn.execute(text("""
+                SELECT item_text, response, response_label FROM likert_responses
+                WHERE user_id = :u AND session_id = :s ORDER BY id
+            """), {"u": session["user_id"], "s": session["session_id"]}).mappings().all()
+            openr = conn.execute(text("""
+                SELECT item_text, response FROM open_responses
+                WHERE user_id = :u AND session_id = :s ORDER BY id
+            """), {"u": session["user_id"], "s": session["session_id"]}).mappings().all()
+        return {"session": session, "likert": [dict(r) for r in likert],
+                "open": [dict(r) for r in openr]}
+    except Exception as e:
+        logger.warning(f"get_session_detail failed for {row_id}: {e}")
+        return None
+
+
+def delete_web_session(token: str) -> None:
+    engine = _get_engine()
+    if engine is None or not _ensure_schema(engine):
+        return
+    try:
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM web_sessions WHERE token = :t"), {"t": token})
+    except Exception as e:
+        logger.warning(f"delete_web_session failed for {token}: {e}")

@@ -1,23 +1,9 @@
-"""
-ConversationCloser — end-or-continue bot (bot #2 of the two new bots).
+"""Decides when to wrap up the interview.
 
-Ported and extended from candor/agents/closing_agent.py. Decides, before each
-interviewer turn, whether to:
-
-  - keep interviewing normally ("normal"),
-  - inject a soft check-in / close-offer and wait for the reply
-    ("scripted_offer" -> AWAITING_CLOSE_REPLY): the "we've talked a good while,
-    would you like to continue or wrap up?" prompt, triggered by a length
-    check-in, a disengagement streak, or a mild LLM-diagnosed breakdown,
-  - wind down gracefully: ask one final "anything to add?" question, then end
-    ("scripted_wind_down" -> end after the next answer), triggered by the
-    respondent volunteering a stop or declining a close-offer,
-  - end immediately ("end_now"), triggered by a *severe* LLM-diagnosed breakdown
-    (hostile / trolling / refusing) — this is SparkMe ending a horrendous
-    conversation on its own.
-
-The closer holds the small state machine per session and is *consulted* by the
-Interviewer at the top of each turn (single interviewer output per turn).
+Before each interviewer turn this looks at the latest answer and the engagement
+monitor and picks one of: keep going, offer to wrap up, ask a final "anything to
+add?" then end, or (if things have gone really badly) end right away. It's a
+small state machine and doesn't send its own messages.
 """
 import os
 import re
@@ -99,7 +85,7 @@ class ConversationCloser:
         self.close_offers = 0
         self.pivots = 0
 
-    # --- scripted lines (ported from candor) ---
+    # The fixed lines we fall back on when offering to wrap up or ending.
     def _close_offer(self) -> str:
         return (f"We've covered a good amount on {self.topic_name}. Would you like to "
                 f"keep going with a few more questions, or would you prefer to wrap up?")

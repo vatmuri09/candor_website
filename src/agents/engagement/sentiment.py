@@ -1,11 +1,8 @@
-"""
-Lightweight sentiment / engagement NLP for the EngagementMonitor.
+"""Sentiment scoring for the engagement monitor, using NLTK's VADER.
 
-Uses NLTK's VADER (already a project dependency). VADER is a lexicon+rule model
-tuned for short, informal text — a good fit for chat answers and, unlike a neural
-model, free and instant per turn. The lexicon is lazily loaded and, if missing on
-a fresh server, downloaded once; if that fails we fall back to a tiny built-in
-polarity heuristic so the interview never breaks over a missing data file.
+VADER works well on short chat text. We load it lazily and download the lexicon
+if it's missing. If that fails for some reason, we fall back to a small word list
+so the interview doesn't crash.
 """
 import re
 import threading
@@ -14,7 +11,7 @@ _analyzer = None
 _lock = threading.Lock()
 _fallback = False
 
-# Minimal fallback lexicon (only used if VADER can't be loaded at all).
+# Used only if VADER can't be loaded at all.
 _POS = {"good", "great", "love", "enjoy", "enjoyed", "happy", "excited", "fun",
         "interesting", "glad", "like", "helpful", "nice", "yes", "definitely"}
 _NEG = {"bad", "hate", "boring", "bored", "tired", "annoyed", "annoying",

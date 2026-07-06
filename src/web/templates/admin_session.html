@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Interview {{ session.id }}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #f4f4f5; color: #111827; }
+    header { background: #111827; color: #fff; padding: 16px 24px; }
+    header a { color: #cbd5e1; font-size: 14px; }
+    .wrap { padding: 24px; max-width: 800px; margin: 0 auto; }
+    .card { background: #fff; border-radius: 8px; padding: 16px 20px; margin-bottom: 20px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+    h2 { font-size: 16px; margin-top: 0; }
+    .meta { font-size: 14px; color: #374151; }
+    .msg { padding: 8px 12px; margin: 6px 0; border-radius: 8px; font-size: 14px; }
+    .Interviewer { background: #eef2ff; }
+    .User { background: #f0fdf4; }
+    .role { font-weight: 600; font-size: 12px; color: #6b7280; }
+    li { font-size: 14px; margin-bottom: 4px; }
+  </style>
+</head>
+<body>
+  <header><a href="{{ url_for('admin_home') }}">&larr; All interviews</a></header>
+  <div class="wrap">
+    <div class="card">
+      <h2>Session {{ session.session_id }} — {{ session.user_id }}</h2>
+      <div class="meta">
+        Type: {{ session.conversation_type }}<br>
+        Topic: {{ session.topic }}<br>
+        Turns: {{ session.num_user_turns }} user / {{ session.num_interviewer_turns }} interviewer<br>
+        End reason: {{ session.end_reason }}<br>
+        Recorded: {{ session.created_at }}
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Transcript</h2>
+      {% if session.transcript %}
+        {% for m in session.transcript %}
+          <div class="msg {{ m.role }}">
+            <div class="role">{{ m.role }}</div>{{ m.content }}
+          </div>
+        {% endfor %}
+      {% else %}
+        <p class="meta">No transcript stored.</p>
+      {% endif %}
+    </div>
+
+    {% if likert %}
+    <div class="card">
+      <h2>Likert answers</h2>
+      <ul>
+        {% for r in likert %}
+          <li>{{ r.item_text }} — <strong>{{ r.response }}</strong>
+              {% if r.response_label %}({{ r.response_label }}){% endif %}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+
+    {% if open %}
+    <div class="card">
+      <h2>Open-ended answers</h2>
+      <ul>
+        {% for r in open %}<li><strong>{{ r.item_text }}</strong><br>{{ r.response }}</li>{% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+  </div>
+</body>
+</html>

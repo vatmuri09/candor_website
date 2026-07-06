@@ -391,17 +391,12 @@
         // ===================================================================
         // AUDIO PLAYBACK
         // ===================================================================
-        async function playMessageAudio(messageId, retries = 5) {
-            if (!messageId || !ttsEnabled) return;
+        async function playMessageAudio(text, retries = 5) {
+            if (!text || !ttsEnabled) return;
 
             for (let i = 0; i < retries; i++) {
                 try {
-                    const response = await fetch(`/api/get-voice-response?session_token=${sessionToken}&message_id=${messageId}`);
-                    
-                    if (response.status === 202) {
-                        await new Promise(resolve => setTimeout(resolve, 1000));
-                        continue;
-                    }
+                    const response = await fetch(`/api/get-voice-response?text=${encodeURIComponent(text)}`);
 
                     if (!response.ok) {
                         console.warn(`TTS fetch failed: ${response.status}`);
@@ -491,7 +486,7 @@
                         if (msg.role === 'Interviewer' || msg.role === 'assistant') {
                             const wasNew = appendMessage('bot', msg.content, msg.id);
                             if (wasNew && msg.id) {
-                                playMessageAudio(msg.id);
+                                playMessageAudio(msg.content);
                             }
                         } else if (msg.role === 'User' || msg.role === 'user') {
                             appendMessage('user', msg.content, msg.id);

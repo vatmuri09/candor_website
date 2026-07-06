@@ -159,7 +159,7 @@ class ExplorationPlanner(BaseAgent, Participant):
                 f"[NOTIFY] ({self.name}) Triggering strategic planning at turn {current_turn}"
             )
             # Run planning in background (non-blocking)
-            asyncio.create_task(self._run_strategic_planning())
+            self.interview_session._spawn(self._run_strategic_planning())
 
     def _should_trigger_planning(self, current_turn: int) -> bool:
         """

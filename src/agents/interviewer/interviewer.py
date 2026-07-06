@@ -63,9 +63,9 @@ class Interviewer(BaseAgent, Participant):
         }
 
         self._turn_to_respond = False
-        # A one-turn instruction the ConversationCloser can inject (e.g. pivot note).
+        # A one-turn note the closer can add to the prompt (e.g. "change topic").
         self._pending_directive_note = ""
-        # Running tally of guardrail interventions, persisted with the session for research.
+        # Counts of how often each guardrail fired, saved with the session.
         self.guardrail_stats = {
             "affirmation": 0, "closing": 0,
             "stance": 0, "advice": 0, "no_question": 0,
@@ -73,16 +73,7 @@ class Interviewer(BaseAgent, Participant):
         }
 
     async def _handle_response(self, response: str, subtopic_id: str = "") -> str:
-        """Handle responses from the RespondToUser tool and adding them to chat history.
-
-        Enforces the non-affirming stance before anything reaches the respondent:
-        strips sycophancy deterministically, and if a hard guardrail is tripped
-        (no question / stated stance / advice) regenerates the turn once.
-
-        Args:
-            response: The response text to add to chat history
-            subtopic_id: The subtopic ID of the response
-        """
+        """Clean up the interviewer's reply and add it to the chat history."""
         clean = await self._enforce_non_affirming(response)
 
         self.interview_session.add_message_to_chat_history(
@@ -132,11 +123,7 @@ class Interviewer(BaseAgent, Participant):
         return inspection.clean_text
 
     async def _regenerate_question(self, bad_draft: str, violations: list) -> str:
-        """One focused LLM call that rewrites a guardrail-failing turn as a bare question.
-
-        Uses a compact plain-text prompt (not the tool format) so no XML parsing is
-        needed, and only runs when a violation is detected — normally never.
-        """
+        """Ask the model to rewrite a bad turn as a single plain question."""
         recent = self.get_event_stream_str(
             [
                 {"sender": "Interviewer", "tag": "message"},

@@ -134,6 +134,5 @@ google-auth-httplib2==0.2.0
 httplib2==0.22.0
 # Only needed to run scripts/get_oauth_token.py locally (not used by the server)
 google-auth-oauthlib==1.2.1
-# Optional — only needed if you enable the research DB (set POSTGRES_URL).
-# Uncomment to store session metadata + Likert responses in Vercel Postgres/Neon.
-# psycopg2-binary==2.9.10
+# Postgres driver for the research DB / live session store (Vercel Postgres/Neon).
+psycopg2-binary==2.9.10

@@ -1,35 +1,11 @@
-"""
-Anti-sycophancy + interviewer guardrails (deterministic layer).
+"""Helpers to keep the interviewer from being sycophantic.
 
-Generalizes candor's reply-cleaning filters into a reusable module used by the
-Interviewer to enforce a *non-affirming* interviewing stance:
-
-  1. `sanitize_interviewer_turn` strips sycophantic / evaluative / service-register
-     language from a generated turn (leading affirmations, "thanks for sharing",
-     "that's fascinating", closing pleasantries, chained combinations of these).
-
-  2. `inspect_turn` runs the guardrails: does the turn actually ask a question,
-     does the interviewer posit its own stance, or is it answering / advising the
-     respondent instead of interviewing them? These are the failure modes Vikram
-     flagged (the bot "replies to the user's comments, shifts from asking questions,
-     and posits its stances").
-
-Stripping is deterministic and always applied. The heavier guardrail failures
-(no question, stated stance, giving advice) are reported so the Interviewer can
-regenerate the turn once with a stricter reminder before falling back to the
-sanitized text. Keeping this pure-Python (no LLM) means it is free and runs on
-every turn; the optional regeneration is the only place that costs a call.
-
-Research note: this operationalizes the non-affirming interviewing condition
-(cf. Sharma et al. 2024 on sycophancy; Cheng et al. 2025 on social sycophancy)
-so that affirmation is a measured, removable variable rather than baked-in tone.
+We strip praise/affirmations off the front of a generated turn and flag turns
+that don't ask a question, state an opinion, or give advice. It's all plain regex
+so it runs every turn without an extra LLM call.
 """
 import re
 from dataclasses import dataclass, field
-
-# ---------------------------------------------------------------------------
-# 1. Sycophancy / evaluative-affirmation strippers
-# ---------------------------------------------------------------------------
 
 # Evaluative adjectives an interviewer should never apply to an answer.
 _EVAL_ADJ = (
@@ -121,10 +97,6 @@ def sanitize_interviewer_turn(text: str) -> tuple[str, list]:
             break
     return (cleaned if cleaned.strip() else text), flags
 
-
-# ---------------------------------------------------------------------------
-# 2. Guardrails — stance, advice, and "is this even a question?"
-# ---------------------------------------------------------------------------
 
 # First-person stance / opinion — the interviewer must not editorialize.
 _STANCE = re.compile(

@@ -17,9 +17,18 @@ engine_constructor = {
     "gpt-4o-mini-2024-07-18": ChatOpenAI,
     "gpt-3.5-turbo-0125": ChatOpenAI,
     "gpt-4o": ChatOpenAI,
+    "gpt-5": ChatOpenAI,
+    "gpt-5-mini": ChatOpenAI,
+    "gpt-5-nano": ChatOpenAI,
+    "gpt-5.1": ChatOpenAI,
+    "gpt-5.2": ChatOpenAI,
     "meta-llama/Llama-3.1-8B-Instruct": ChatTogether,
     "meta-llama/Llama-3.1-70B-Instruct": ChatTogether
 }
+
+# The GPT-5 models don't take max_tokens or a custom temperature like the older
+# OpenAI models do, so they need to be handled a little differently below.
+gpt5_models = {"gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-5.1", "gpt-5.2"}
 
 def get_engine(model_name, **kwargs):
     """
@@ -82,6 +91,17 @@ def get_engine(model_name, **kwargs):
         actual_model_name = model_name[5:]  # Remove "vllm:" prefix
         kwargs["max_tokens"] = token_limit
         return VLLMEngine(model_name=actual_model_name, **kwargs)
+
+    # GPT-5 models: they use max_completion_tokens instead of max_tokens and
+    # only allow the default temperature (1), so set those and skip the usual
+    # max_tokens below.
+    if model_name in gpt5_models or model_name.startswith("gpt-5"):
+        kwargs["temperature"] = 1
+        model_kwargs = kwargs.pop("model_kwargs", {})
+        model_kwargs["max_completion_tokens"] = token_limit
+        kwargs["model_kwargs"] = model_kwargs
+        kwargs["model_name"] = model_name
+        return ChatOpenAI(**kwargs)
 
     # For other models (OpenAI, Llama), use max_tokens
     kwargs["max_tokens"] = token_limit

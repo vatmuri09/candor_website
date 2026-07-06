@@ -137,6 +137,11 @@ class InterviewSession:
         # Chat history
         self.chat_history: list[Message] = []
 
+        # Background tasks spawned during a turn (notifications, agenda/planner
+        # work). We keep references so a synchronous turn can wait for them all
+        # to finish before responding. See _spawn / _drain / run_one_turn.
+        self._bg_tasks: set = set()
+
         # Session states signals
         self.interaction_mode = interaction_mode
         self.session_in_progress = True
@@ -281,6 +286,13 @@ class InterviewSession:
         
         self.tokenizer = get_encoding("cl100k_base")
 
+    def _spawn(self, coro):
+        """Start a background task and keep a reference so a turn can wait on it."""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
+
     async def _notify_participants(self, message: Message):
         """Notify subscribers asynchronously"""
         # Gets subscribers for the user that sent the message.
@@ -297,7 +309,7 @@ class InterviewSession:
         tasks = []
         for sub in subscribers:
             if self.session_in_progress:
-                task = asyncio.create_task(sub.on_message(message))
+                task = self._spawn(sub.on_message(message))
                 tasks.append(task)
         
         # Allow tasks to run concurrently without waiting for each other
@@ -395,7 +407,7 @@ class InterviewSession:
                 "chat_history", f"{message.role}: {message.content}")
             
             # Notify participants
-            asyncio.create_task(self._notify_participants(message))
+            self._spawn(self._notify_participants(message))
 
 
         SessionLogger.log_to_file(
@@ -405,6 +417,153 @@ class InterviewSession:
                 f"to chat history."
             )
         )
+
+    async def _drain(self):
+        """Wait until every background task from this turn has finished.
+
+        A turn kicks off a cascade of tasks (notify the interviewer, which in turn
+        notifies the agenda manager and the user buffer, etc.). We keep gathering
+        them until nothing is left running and the agenda manager / exploration
+        planner are both idle.
+        """
+        while True:
+            pending = [t for t in list(self._bg_tasks) if not t.done()]
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+                continue
+            # Let any just-scheduled task get going, then check the slow agents.
+            await asyncio.sleep(0)
+            if (self.agenda_manager.processing_in_progress or
+                    self.exploration_planner.processing_in_progress):
+                await asyncio.sleep(0.05)
+                continue
+            if not any(not t.done() for t in self._bg_tasks):
+                break
+
+    def _collect_interviewer_messages(self) -> List[str]:
+        """Pull any interviewer messages that were buffered during the turn."""
+        if hasattr(self.user, "get_and_clear_messages"):
+            msgs = self.user.get_and_clear_messages() or []
+            return [m["content"] for m in msgs if m.get("role") == "Interviewer"]
+        return []
+
+    async def start(self) -> List[str]:
+        """Set up the agenda and generate the opening question. Run once per session."""
+        await self.agenda_manager.augment_session_agenda(
+            additional_context_path=self._initial_additional_context_path)
+        self.session_in_progress = True
+        # Interviewer opens the conversation.
+        await self._interviewer.on_message(None)
+        await self._drain()
+        return self._collect_interviewer_messages()
+
+    async def run_one_turn(self, user_text: str) -> List[str]:
+        """Feed one user message through the pipeline and return the reply."""
+        if not self.session_in_progress:
+            return []
+        self.add_message_to_chat_history(role="User", content=user_text)
+        await self._drain()
+        return self._collect_interviewer_messages()
+
+    # ---- state save/restore so a session can survive between web requests ----
+
+    def _agents_for_state(self) -> dict:
+        """The agents whose event stream we need to keep between turns."""
+        return {
+            "interviewer": self._interviewer,
+            "agenda_manager": self.agenda_manager,
+            "exploration_planner": self.exploration_planner,
+            "engagement_monitor": self.engagement_monitor,
+            "context_bias_agent": self.context_bias_agent,
+        }
+
+    def to_state(self) -> dict:
+        """Dump the in-memory conversation state to a plain dict (JSON-safe).
+
+        The FAISS banks, the session agenda and the strategic state are saved to
+        their own files (see save_files); this covers everything else so a fresh
+        InterviewSession can be rebuilt and pick up exactly where it left off.
+        """
+        self.save_files()
+        monitor, closer, interviewer = (
+            self.engagement_monitor, self.conversation_closer, self._interviewer)
+        last_sig = monitor.last_signal
+        return {
+            "session_id": self.session_id,
+            "session_in_progress": self.session_in_progress,
+            "session_completed": self.session_completed,
+            "user_message_count": self._user_message_count,
+            "max_turns": self.max_turns,
+            "interview_description": self._interview_description,
+            "chat_history": [m.model_dump(mode="json") for m in self.chat_history],
+            "context_bias_reports": self.context_bias_reports,
+            "event_streams": {
+                name: [e.model_dump(mode="json") for e in agent.event_stream]
+                for name, agent in self._agents_for_state().items()
+            },
+            "engagement_monitor": {
+                "answer_history": monitor.answer_history,
+                "sentiments": monitor.sentiments,
+                "streak": monitor.streak,
+                "turns_since_llm_check": monitor._turns_since_llm_check,
+                "last_signal": last_sig.__dict__ if last_sig else None,
+            },
+            "conversation_closer": {
+                "state": closer.state,
+                "last_offer_turn": closer._last_offer_turn,
+                "close_offers": closer.close_offers,
+                "pivots": closer.pivots,
+            },
+            "interviewer": {
+                "guardrail_stats": interviewer.guardrail_stats,
+                "pending_directive_note": interviewer._pending_directive_note,
+            },
+        }
+
+    def load_state(self, state: dict) -> None:
+        """Restore a session dict produced by to_state onto this fresh session."""
+        from src.agents.engagement.engagement_monitor import QualitySignal
+
+        self.session_id = state["session_id"]
+        self.session_in_progress = state["session_in_progress"]
+        self.session_completed = state["session_completed"]
+        self._user_message_count = state.get("user_message_count", 0)
+        self.max_turns = state.get("max_turns")
+        self.context_bias_reports = state.get("context_bias_reports", [])
+        self.chat_history = [Message(**m) for m in state.get("chat_history", [])]
+
+        streams = state.get("event_streams", {})
+        for name, agent in self._agents_for_state().items():
+            agent.event_stream = [BaseAgent.Event(**e) for e in streams.get(name, [])]
+
+        mon = state.get("engagement_monitor", {})
+        self.engagement_monitor.answer_history = mon.get("answer_history", [])
+        self.engagement_monitor.sentiments = mon.get("sentiments", [])
+        self.engagement_monitor.streak = mon.get("streak", 0)
+        self.engagement_monitor._turns_since_llm_check = mon.get("turns_since_llm_check", 0)
+        if mon.get("last_signal"):
+            self.engagement_monitor.last_signal = QualitySignal(**mon["last_signal"])
+
+        clo = state.get("conversation_closer", {})
+        self.conversation_closer.state = clo.get("state", self.conversation_closer.ACTIVE)
+        self.conversation_closer._last_offer_turn = clo.get("last_offer_turn", 0)
+        self.conversation_closer.close_offers = clo.get("close_offers", 0)
+        self.conversation_closer.pivots = clo.get("pivots", 0)
+
+        itv = state.get("interviewer", {})
+        self._interviewer.guardrail_stats = itv.get("guardrail_stats",
+                                                     self._interviewer.guardrail_stats)
+        self._interviewer._pending_directive_note = itv.get("pending_directive_note", "")
+
+    def save_files(self) -> None:
+        """Persist the FAISS banks, agenda and strategic state to disk."""
+        try:
+            self.memory_bank.save_to_file(self.user_id)
+            self.historical_question_bank.save_to_file(self.user_id)
+            self.session_agenda.save(save_type="original")
+            self.exploration_planner.strategic_state.save_to_file(self.user_id)
+        except Exception as e:
+            SessionLogger.log_to_file("execution_log", f"[STATE] save_files warning: {e}")
 
     async def run(self):
         """Run the interview session"""

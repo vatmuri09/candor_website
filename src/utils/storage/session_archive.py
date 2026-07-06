@@ -1,18 +1,12 @@
-"""
-Session archival dispatcher.
+"""Zips up a finished interview and uploads it to storage.
 
-Builds one in-memory zip of a finished interview's data and ships it to the
-configured storage backend. Vercel Blob is the primary backend now; Google
-Drive is kept as an optional fallback so existing deployments keep working.
+STORAGE_BACKEND picks where it goes:
+  auto   - Google Drive if set up, else Vercel Blob, else nothing (stays on disk)
+  vercel - Vercel Blob only
+  drive  - Google Drive only
+  both   - every backend that's configured
 
-Backend selection (env STORAGE_BACKEND, default "auto"):
-  auto    -> Google Drive if configured (the existing setup), else Vercel Blob
-             if BLOB_READ_WRITE_TOKEN is set, else no-op (data stays on disk).
-  vercel  -> Vercel Blob only.
-  drive   -> Google Drive only.
-  both    -> upload to every configured backend.
-
-Kept best-effort: never raises into the request path.
+Never raises, so a failed upload can't break a finished session.
 """
 import io
 import logging

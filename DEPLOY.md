@@ -1,52 +1,64 @@
-# Deploying the Candor interview web app
+# Deploying the interview web app on Vercel
 
-This app is a **stateful, long-running Flask service** (in-memory sessions +
-per-session background asyncio loops + a FAISS memory bank on disk). That means
-it needs a **persistent container host**, not a serverless platform like Vercel.
-These instructions use **Render**, which deploys straight from a GitHub repo and
-gives you a persistent disk. (Google Cloud Run / Railway / Fly.io work too — the
-`Dockerfile` is generic.)
+Each interview **turn now runs to completion inside a single request**, and the
+session is saved to **Vercel Postgres** between turns (there's no long-running
+server holding it in memory). That makes the app fit Vercel's serverless model.
+Working files (FAISS banks, agenda, logs) go to `/tmp`; the durable copy lives in
+Postgres, and finished interviews are archived to Vercel Blob.
 
 The user flow: visitor lands on `/` → picks a **conversation type** → chats with
-the AI interviewer. The OpenAI key and all storage stay server-side.
+the AI interviewer. The OpenAI key and all storage stay server-side. Admins read
+past conversations at `/admin` (password protected).
 
 ---
 
-## 1. Push the code to the `candor_website` repo
+## 1. Push the code to GitHub
 
 ```bash
 # from the project root
-git remote add candor_website https://github.com/<your-org-or-user>/candor_website.git
-git push -u candor_website main
+git remote add origin https://github.com/<your-org-or-user>/<repo>.git
+git push -u origin main
 ```
-
-If the remote already has commits, either push to a fresh empty repo or
-`git push -u candor_website main --force` to overwrite it (careful — this
-replaces its history).
 
 ---
 
-## 2. Deploy on Render
+## 2. Deploy on Vercel
 
-1. Go to <https://dashboard.render.com> → **New +** → **Blueprint**.
-2. Connect GitHub and pick the **candor_website** repo.
-3. Render reads [`render.yaml`](render.yaml) and provisions a Docker web service
-   named `candor-website` on the **free** plan (no payment info required).
-4. Before the first deploy finishes, set the secret env vars (they're marked
-   `sync: false`, so Render prompts you):
-   - **`OPENAI_API_KEY`** — your OpenAI key (required).
-   - `FLASK_SECRET_KEY` — leave it; Render auto-generates one.
-   - `GOOGLE_SERVICE_ACCOUNT_JSON` / `GDRIVE_FOLDER_ID` — optional, see §3.
-5. Deploy. When it's live, open the service URL — you'll land on the
-   conversation picker. `<url>/health` should return `{"status": "healthy"}`.
+1. Create the storage first: in the Vercel dashboard → **Storage** →
+   - **Postgres** (Neon) — create a database. Vercel adds `POSTGRES_URL` to the
+     project automatically when you link it.
+   - **Blob** — create a store and copy its `BLOB_READ_WRITE_TOKEN`.
+2. **Add New… → Project**, import the GitHub repo. Vercel detects
+   [`vercel.json`](vercel.json) and the Python function at
+   [`api/index.py`](api/index.py); no build settings needed. Pick the **Pro**
+   plan so functions can run up to `maxDuration: 300`.
+3. Set the environment variables (Project → Settings → Environment Variables):
 
-> **Plan note:** `render.yaml` uses the **free** plan (no payment info needed).
-> The free plan has **no persistent disk**, so saved interview data is wiped on
-> redeploy and the service **sleeps after ~15 min idle** (first visitor then
-> waits ~30-60s for wake-up). For always-on + durable storage, change
-> `plan: free` → `plan: starter` and add a `disk:` block mounted at `/var/data`
-> (this requires payment info). Either way, keep **one instance / one worker** —
-> sessions live in memory, so multiple instances would break them.
+   | Variable | Value |
+   | --- | --- |
+   | `OPENAI_API_KEY` | your OpenAI key (**required**) |
+   | `POSTGRES_URL` | from the linked Postgres store (**required** — this is where live sessions + transcripts are stored) |
+   | `BLOB_READ_WRITE_TOKEN` | from the Blob store (for zip archives) |
+   | `STORAGE_BACKEND` | `vercel` |
+   | `ADMIN_PASSWORD` | any password — gates `/admin` |
+   | `FLASK_SECRET_KEY` | any long random string |
+   | `LOGS_DIR` | `/tmp/logs` |
+   | `DATA_DIR` | `/tmp/data` |
+   | `MODEL_NAME` | e.g. `gpt-4.1-mini`, or a GPT-5 model like `gpt-5-mini` |
+   | `EMBEDDING_BACKEND` | `openai` (keeps the function small — no torch) |
+
+   Optional model overrides (`AGENDA_MANAGER_MODEL_NAME`,
+   `EXPLORATION_PLANNER_MODEL_NAME`, etc.) default to `MODEL_NAME`.
+4. **Deploy.** When it's live, open the URL — you'll land on the conversation
+   picker. `<url>/health` returns `{"status": "healthy", "db": true, ...}` once
+   Postgres is wired up.
+5. Visit `<url>/admin`, sign in with `ADMIN_PASSWORD`, and you'll see each
+   finished interview with its transcript, Likert answers, and agent stats.
+
+> **Note:** the whole app is served by the single Python function in
+> `api/index.py`; `vercel.json` rewrites every path to it. The Postgres tables
+> (`interview_sessions`, `likert_responses`, `open_responses`, `web_sessions`)
+> are created automatically on first use.
 
 ---
 

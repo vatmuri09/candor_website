@@ -1,30 +1,10 @@
-"""
-ContextBiasAgent — evaluates compiled context/source material for bias.
+"""Checks context/source material for political slant before we feed it to the interviewer.
 
-Task: when an interview is seeded with external context (the additional-context
-file, or, in future, retrieved sources), that material can smuggle slant into the
-interviewer's questions — a confound for political-science data. This agent
-produces a bias report so the slant is measured and attributable, WITHOUT
-scrubbing the substance. Vikram's constraint: mitigate bias, don't erase the
-interesting/meaty details.
-
-Two layers:
-
-  1. Deterministic lexical report (free, no network): VADER polarity, a
-     subjectivity estimate, and hits against curated loaded-language / partisan /
-     hedging lexicons. Good for a quick, reproducible numeric signal and for
-     flagging obviously slanted material even with no LLM available.
-
-  2. LLM analysis (paid, optional): separates established fact from contested
-     framing, estimates a lean, lists loaded phrasings, and returns a
-     `neutralized_context` that keeps every substantive detail but attributes or
-     de-editorializes the framing. This is the version safe to feed the
-     interviewer; the original is preserved alongside for provenance.
-
-On why not an off-the-shelf classifier: robust political-bias models (e.g. HF
-transformer classifiers) pull in torch and are heavy for a CPU web deploy, and
-still don't do the fact-vs-framing separation we actually need. The lexical layer
-covers the cheap signal; the LLM covers the nuanced separation.
+When an interview is seeded with extra context, that text can carry bias into the
+questions. We measure it two ways: a quick word-list check (VADER polarity plus
+loaded/subjective/hedging terms), and an optional LLM pass that separates facts
+from framing and returns a neutralized version. The goal is to flag the slant,
+not to delete the interesting details.
 """
 import json
 import re
@@ -35,7 +15,7 @@ from src.agents.base_agent import BaseAgent
 from src.agents.engagement.sentiment import sentiment_compound
 from src.utils.logger.session_logger import SessionLogger
 
-# Curated lexicons (small, transparent, editable). Not exhaustive — a cheap prior.
+# Small hand-picked word lists. Not exhaustive, just a cheap first pass.
 _LOADED_TERMS = re.compile(
     r"\b(radical|extremist|regime|thug|terrorist|patriot|freedom[- ]loving|"
     r"woke|snowflake|libtard|rino|fascist|nazi|communist|socialist agenda|"

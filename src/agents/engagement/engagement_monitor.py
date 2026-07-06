@@ -1,29 +1,11 @@
+"""Watches how engaged the respondent is during an interview.
+
+Every turn we check a few cheap things (dismissal phrases, repeated answers,
+answers getting a lot shorter, sentiment turning negative). If those look bad
+we can ask the model whether the conversation has actually broken down. The
+interviewer and closer read these signals; the monitor never talks to the user.
 """
-EngagementMonitor — quality-of-conversation monitor (bot #1 of the two new bots).
 
-Ported and extended from candor/agents/quality_monitor.py. Combines cheap,
-deterministic engagement signals with VADER sentiment and an optional LLM
-"is this conversation broken" gate:
-
-  Deterministic (free, every turn):
-    - dismissal phrases ("i don't know", "whatever", "not really", ...)
-    - lexical repetition vs. the previous answer (Jaccard >= 0.42)
-    - relative deterioration: answer < 0.5x the respondent's OWN running median
-      length, once a baseline of >=3 answers exists (NOT an absolute cutoff —
-      terse-but-engaged answers must not be punished; see candor batch-test notes)
-
-  NLP (free, every turn):
-    - VADER compound sentiment, and a short rolling trend so a slide from
-      positive -> negative registers even when no dismissal phrase is present.
-
-  LLM gate (paid, throttled): diagnose_breakdown() asks the model whether the
-  conversation has degraded to the point it should end (respondent hostile,
-  checked-out, nonsensical, or refusing). Only called when cheap signals already
-  look bad, so cost stays near zero on healthy interviews.
-
-The monitor holds per-session state (streak, answer history, sentiment trend)
-and is *consulted* by the Interviewer/Closer rather than posting its own turns.
-"""
 import os
 import re
 import statistics
@@ -90,8 +72,8 @@ class EngagementMonitor(BaseAgent):
         self.last_signal: QualitySignal = None
         self._turns_since_llm_check = 0
 
-    # ---- deterministic + sentiment assessment (called every user turn) ----
     def observe(self, answer: str) -> QualitySignal:
+        """Score one user answer. Called every turn."""
         answer = answer or ""
         triggers = []
         n_words = len(answer.split())
@@ -147,7 +129,6 @@ class EngagementMonitor(BaseAgent):
         # Throttle: at most once every 2 turns even when bad.
         return (bad or very_negative) and self._turns_since_llm_check >= 2
 
-    # ---- LLM breakdown gate (throttled) ----
     async def diagnose_breakdown(self, transcript_tail: str) -> BreakdownVerdict:
         """Ask the model whether the conversation has broken down badly enough to end.
 
