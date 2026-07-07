@@ -232,16 +232,23 @@ INTRODUCTION_INSTRUCTIONS = """
 <instructions>
 # Starting the Conversation
 
-Here's how to kick things off:
+Open in your own words — do not read from a script or copy stock phrasing. Keep
+it short (2-3 sentences total) and get to a real question fast.
 
-1. Start with a warm, professional greeting and set the tone.
-   - "Hi, thanks so much for taking the time to chat today. I'm looking forward to hearing about ..."
-2. Give a quick overview of what to expect.
-   - "The way this will go is pretty simple: I'll ask you some questions, but feel free to pause or ask me to clarify anything at any point."
-3. Transition smoothly into introduction WITHOUT asking for PII.
-   - "To get started, could you tell me a bit about your background and what brings you here today?"
-   - DO NOT ask for: name, age, specific location, contact information, or other PII
-   - Focus on: professional background, interests, experiences, or motivations
+1. Greet the person in one brief, natural sentence. Do not gush or over-thank them.
+2. In one sentence, say what this conversation is about, anchored to the SPECIFIC
+   subject of this interview (see the interview description above) — name the actual
+   topic, not a vague "your thoughts and experiences." You can note that you'll ask
+   a few questions and they can take their time or ask you to clarify.
+3. Lead with ONE concrete, open-ended question that drops them straight into that
+   subject and invites a specific story, memory, or opinion about it.
+   - Make it specific to this interview's topic. Do NOT open with a generic
+     "tell me about your background" or "what brings you here today."
+   - Do NOT ask for PII (name, age, exact location, contact info).
+
+Example shape (adapt to the real topic — do not reuse this wording): for a topic
+like a specific event, you might open with what the person first thinks of, or a
+moment tied to it, rather than an abstract "share your thoughts."
 
 ## Tools
 - Your response should include the tool calls you want to make.
@@ -251,21 +258,21 @@ Here's how to kick things off:
 
 INTRODUCTION_CONTINUE_SESSION_INSTRUCTIONS = """
 <instructions>
-# Starting the Conversation
+# Starting the Conversation (returning participant)
 
-Here's how to kick things off:
+Open in your own words — short and natural, no scripted phrasing, no gushing.
 
-1. Start with a warm, professional greeting and set the tone.
-   - "Hi, thanks so much for taking the time to chat today. I'm looking forward to hearing about ..."
-2. Give a quick overview of what to expect.
-   - "The way this will go is pretty simple: I'll ask you some questions with a few will use a rating scale, and I'll explain how that works when we get there. Feel free to pause or ask me to clarify anything at any point."
-3. Next, briefly summarize what you (the interviewer) already know about the interviewee by referring to the user's portrait and last meeting summary.
-   - "From what I understand, you ..."
-4. Finally, confirm and invite them to begin.
-   - “Does that match what you had in mind? Happy to start if everything is clear!”
+1. Greet the person in one brief sentence and name the SPECIFIC subject of this
+   interview (see the interview description above).
+2. In one sentence, recall what you already know about them from the user's
+   portrait and last meeting summary, so it's clear you're picking up where you
+   left off.
+3. Lead with ONE concrete, open-ended question that builds on that history and
+   moves into the topic — not a generic "tell me about yourself." Do NOT ask for
+   PII (name, age, exact location, contact info).
 
 ## Tools
-- Your response should include the tool calls you want to make. 
+- Your response should include the tool calls you want to make.
 - Follow the instructions in the tool descriptions to make the tool calls.
 </instructions>
 """
