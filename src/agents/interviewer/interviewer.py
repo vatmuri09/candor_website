@@ -244,6 +244,20 @@ class Interviewer(BaseAgent, Participant):
                     f"iterations ({self._max_consideration_iterations})"
                 )
 
+    def _first_planned_subtopic(self) -> str:
+        """The first subtopic in the interview plan — the deterministic starting
+        point for the opening question. Same plan always yields the same opener."""
+        try:
+            topics = self.interview_session.session_agenda \
+                .interview_topic_manager.get_all_topics()
+            for topic in topics:
+                for subtopic in topic.required_subtopics.values():
+                    if subtopic.description:
+                        return subtopic.description
+        except Exception:
+            pass
+        return "the person's background and relationship to this topic"
+
     def _get_prompt(self):
         '''Gets the prompt for the interviewer. '''
         # Get user portrait and last meeting summary from session agenda
@@ -291,7 +305,9 @@ class Interviewer(BaseAgent, Participant):
             "current_events": '\n'.join(current_events),
             "recent_interviewer_messages": '\n'.join(
                 [msg for msg in recent_interviewer_messages]),
-            "tool_descriptions": self.get_tools_description(list(tools_set))
+            "tool_descriptions": self.get_tools_description(list(tools_set)),
+            # Deterministic first question: always the first subtopic in the plan.
+            "opening_subtopic": self._first_planned_subtopic(),
         }
 
         # Only add questions_and_notes for normal mode

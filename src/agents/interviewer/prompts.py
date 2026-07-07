@@ -232,23 +232,22 @@ INTRODUCTION_INSTRUCTIONS = """
 <instructions>
 # Starting the Conversation
 
-Open in your own words — do not read from a script or copy stock phrasing. Keep
-it short (2-3 sentences total) and get to a real question fast.
+Open in your own words — short and natural, no scripted phrasing, no gushing. Keep
+it to 2-3 sentences and get to the question.
 
-1. Greet the person in one brief, natural sentence. Do not gush or over-thank them.
-2. In one sentence, say what this conversation is about, anchored to the SPECIFIC
-   subject of this interview (see the interview description above) — name the actual
-   topic, not a vague "your thoughts and experiences." You can note that you'll ask
-   a few questions and they can take their time or ask you to clarify.
-3. Lead with ONE concrete, open-ended question that drops them straight into that
-   subject and invites a specific story, memory, or opinion about it.
-   - Make it specific to this interview's topic. Do NOT open with a generic
-     "tell me about your background" or "what brings you here today."
+1. Greet the person in one brief sentence and name the SPECIFIC subject of this
+   interview: {interview_description}. Not a vague "your thoughts and experiences."
+
+2. Then ask your FIRST question. It MUST be about this exact starting point from
+   the interview plan:
+       "{opening_subtopic}"
+   Phrase it as ONE concrete, open-ended question, in the context of
+   {interview_description}, that invites a specific story, example, or account.
+   This is fixed: every interview opens on this same starting point — your job is
+   only to phrase it well and make it land, not to pick a different opener.
+   - Do NOT drift to another topic, and do NOT open with a generic "tell me about
+     your background" or "what brings you here today."
    - Do NOT ask for PII (name, age, exact location, contact info).
-
-Example shape (adapt to the real topic — do not reuse this wording): for a topic
-like a specific event, you might open with what the person first thinks of, or a
-moment tied to it, rather than an abstract "share your thoughts."
 
 ## Tools
 - Your response should include the tool calls you want to make.
