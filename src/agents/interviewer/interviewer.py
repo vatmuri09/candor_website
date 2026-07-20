@@ -22,7 +22,7 @@ _ANY_XML_TAG_RE = re.compile(r"<[^>]+>")
 # drilling into one thread) before the next prompt gets a hard directive to move on.
 # Tracked in code (Interviewer._same_subtopic_streak), not by asking the model to
 # count its own recent questions.
-_DEPTH_CAP_THRESHOLD = 3
+_DEPTH_CAP_THRESHOLD = 2
 
 # Near-duplicate detection across the whole session's interviewer questions.
 # No API call: takes the max of unigram-Jaccard and bigram-Jaccard over
