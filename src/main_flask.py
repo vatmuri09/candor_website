@@ -22,12 +22,16 @@ from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
 
+# Must run before any src.* import: several modules (e.g. session_agenda.py)
+# read env vars like LOGS_DIR/DATA_DIR at MODULE-IMPORT time, not lazily inside
+# functions. Loading .env after those imports silently leaves them None unless
+# the vars already exist as real shell/process env vars.
+load_dotenv(override=True)
+
 from src.utils.speech.text_to_speech import create_tts_engine
 from src.utils.speech.speech_to_text import create_stt_engine
 from src.interview_session.interview_session import InterviewSession
 from src.utils.storage import session_archive, research_db, session_store
-
-load_dotenv(override=True)
 
 START_TIME = time.time()
 
@@ -96,8 +100,67 @@ CONVERSATION_TYPES = {
 DEFAULT_CONVERSATION_TYPE = "ai_workforce"
 
 
-def resolve_conversation(conversation_type, custom_description=None):
+# =============================================================================
+# ADMIN-CREATED INTERVIEWS (custom question sets shared via a link)
+# =============================================================================
+# Small JSON registry mapping a share token -> {title, plan_file, created_at,
+# questions}. The actual topic/subtopic plan for each is a normal topics.json
+# file, generated from the admin's question list and saved next to the presets.
+
+_REGISTRY_PATH = os.path.join('data', 'configs', '_custom_interviews.json')
+
+
+def _load_registry() -> dict:
+    if os.path.exists(_REGISTRY_PATH):
+        try:
+            with open(_REGISTRY_PATH, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_registry(registry: dict) -> None:
+    os.makedirs(os.path.dirname(_REGISTRY_PATH), exist_ok=True)
+    with open(_REGISTRY_PATH, 'w', encoding='utf-8') as f:
+        json.dump(registry, f, indent=2)
+
+
+def create_custom_interview(title: str, questions: list) -> str:
+    """Save an admin-authored question list as a plan file + registry entry.
+
+    Returns the share token. `questions` becomes the subtopics of a single
+    topic named after `title` — the same shape InterviewTopicManager already
+    parses (see data/configs/topics.json).
+    """
+    token = uuid.uuid4().hex[:10]
+    plan_file = f"custom_{token}.json"
+    plan = [{"topic": title, "subtopics": questions}]
+    plan_path = os.path.join('data', 'configs', plan_file)
+    os.makedirs(os.path.dirname(plan_path), exist_ok=True)
+    with open(plan_path, 'w', encoding='utf-8') as f:
+        json.dump(plan, f, indent=2)
+
+    registry = _load_registry()
+    registry[token] = {
+        "title": title, "plan_file": plan_file,
+        "created_at": time.time(), "questions": questions,
+    }
+    _save_registry(registry)
+    return token
+
+
+def get_custom_interview(token: str) -> Optional[dict]:
+    return _load_registry().get(token)
+
+
+def resolve_conversation(conversation_type, custom_description=None, link_token=None):
     """Return (interview_description, interview_plan_path) for a chosen type."""
+    if conversation_type == 'link' and link_token:
+        entry = get_custom_interview(link_token)
+        if entry:
+            return entry["title"], _config_path(entry["plan_file"])
+        # Fall through to default if the token is unknown/stale.
     preset = CONVERSATION_TYPES.get(conversation_type or DEFAULT_CONVERSATION_TYPE,
                                     CONVERSATION_TYPES[DEFAULT_CONVERSATION_TYPE])
     description = preset["description"]
@@ -126,9 +189,9 @@ if not app.debug:
 # BUILDING AND RUNNING A SESSION
 # =============================================================================
 
-def session_meta(user_id, conversation_type, custom_description):
+def session_meta(user_id, conversation_type, custom_description, link_token=None):
     """The bit of info we need to rebuild a session on the next request."""
-    description, plan_path = resolve_conversation(conversation_type, custom_description)
+    description, plan_path = resolve_conversation(conversation_type, custom_description, link_token)
     return {
         "user_id": user_id,
         "conversation_type": conversation_type,
@@ -162,6 +225,27 @@ def _as_messages(texts) -> list:
         out.append({"id": f"msg_{uuid.uuid4().hex}", "role": "Interviewer",
                     "content": t, "timestamp": time.time()})
     return out
+
+
+def _load_or_response(token):
+    """Load a session for a request.
+
+    Returns (session, meta, None) on success, or (None, None, response) where
+    response is a ready-to-return (json, status) tuple:
+      - 503 when storage is transiently unavailable (client should retry)
+      - 400 when the token genuinely isn't a live session
+    """
+    try:
+        loaded = session_store.load(token, build_session)
+    except research_db.StorageUnavailable:
+        return None, None, (jsonify({
+            'success': False, 'retryable': True,
+            'error': 'Storage temporarily unavailable, please retry'}), 503)
+    if loaded is None:
+        return None, None, (jsonify({
+            'success': False, 'error': 'Invalid or expired session'}), 400)
+    session, meta = loaded
+    return session, meta, None
 
 
 def _status_for(session) -> str:
@@ -241,10 +325,11 @@ def start_session():
     data = request.get_json(silent=True) or {}
     conversation_type = data.get('conversation_type') or DEFAULT_CONVERSATION_TYPE
     custom_description = data.get('custom_description')
+    link_token = data.get('link_token')
     user_id = (data.get('user_id') or '').strip() or f"web_{uuid.uuid4().hex[:16]}"
 
     token = str(uuid.uuid4())
-    meta = session_meta(user_id, conversation_type, custom_description)
+    meta = session_meta(user_id, conversation_type, custom_description, link_token)
     session = build_session(meta)
 
     try:
@@ -276,10 +361,9 @@ def research_context():
     """
     data = request.json or {}
     token = data.get('session_token')
-    loaded = session_store.load(token, build_session)
-    if loaded is None:
-        return jsonify({'success': False, 'error': 'Invalid or expired session'}), 400
-    session, meta = loaded
+    session, meta, err = _load_or_response(token)
+    if err is not None:
+        return err
     try:
         result = asyncio.run(
             session.context_research_agent.research_topic(meta["interview_description"]))
@@ -300,10 +384,9 @@ def approve_context():
     token = data.get('session_token')
     approved_text = (data.get('context') or '').strip()
 
-    loaded = session_store.load(token, build_session)
-    if loaded is None:
-        return jsonify({'success': False, 'error': 'Invalid or expired session'}), 400
-    session, meta = loaded
+    session, meta, err = _load_or_response(token)
+    if err is not None:
+        return err
 
     # Idempotent: if the interview already opened, just replay the outbox.
     if session.chat_history:
@@ -328,10 +411,9 @@ def send_message():
     token = data.get('session_token')
     user_message = data.get('message')
 
-    loaded = session_store.load(token, build_session)
-    if loaded is None:
-        return jsonify({'success': False, 'error': 'Invalid or expired session'}), 400
-    session, meta = loaded
+    session, meta, err = _load_or_response(token)
+    if err is not None:
+        return err
 
     if not session.session_in_progress:
         return jsonify({'success': False, 'error': 'Session has ended',
@@ -352,7 +434,13 @@ def send_message():
 def get_messages():
     """Poll for interviewer messages produced by the last turn."""
     token = request.args.get('session_token')
-    result = session_store.fetch_messages(token)
+    try:
+        result = session_store.fetch_messages(token)
+    except research_db.StorageUnavailable:
+        # Transient DB blip on a poll — keep the session alive and let the client
+        # try again on its next tick rather than declaring the interview dead.
+        return jsonify({'success': True, 'messages': [], 'session_active': True,
+                        'transient': True})
     if result is None:
         return jsonify({'success': False, 'error': 'Invalid or expired session'}), 400
 
@@ -388,10 +476,9 @@ def send_voice():
     if stt_engine is None:
         return jsonify({'success': False, 'error': 'Voice input is not enabled'}), 503
 
-    loaded = session_store.load(token, build_session)
-    if loaded is None:
-        return jsonify({'success': False, 'error': 'Invalid or expired session'}), 400
-    session, meta = loaded
+    session, meta, err = _load_or_response(token)
+    if err is not None:
+        return err
 
     tmp = Path(os.getenv('DATA_DIR', 'data')) / f"temp_audio_{uuid.uuid4().hex}.wav"
     tmp.parent.mkdir(parents=True, exist_ok=True)
@@ -434,10 +521,9 @@ def end_session():
     """End the interview early at the user's request."""
     data = request.json or {}
     token = data.get('session_token')
-    loaded = session_store.load(token, build_session)
-    if loaded is None:
-        return jsonify({'success': False, 'error': 'Invalid or expired session'}), 400
-    session, meta = loaded
+    session, meta, err = _load_or_response(token)
+    if err is not None:
+        return err
 
     session.end_session()
     _finalize(token, session, meta)
@@ -479,10 +565,9 @@ def survey_submit():
     """Store the post-interview Likert + open-ended answers."""
     data = request.json or {}
     token = data.get('session_token')
-    loaded = session_store.load(token, build_session)
-    if loaded is None:
-        return jsonify({'success': False, 'error': 'Invalid or expired session'}), 400
-    session, meta = loaded
+    session, meta, err = _load_or_response(token)
+    if err is not None:
+        return err
     session_id = getattr(session, 'session_id', 0)
 
     battery = _load_battery()
@@ -569,6 +654,42 @@ def admin_logout():
 def admin_home():
     sessions = research_db.list_sessions()
     return render_template('admin.html', sessions=sessions)
+
+
+@app.route('/admin/interviews', methods=['GET', 'POST'])
+@admin_required
+def admin_interviews():
+    error = None
+    new_link = None
+    if request.method == 'POST':
+        title = (request.form.get('title') or '').strip()
+        raw_questions = request.form.get('questions') or ''
+        questions = [q.strip() for q in raw_questions.splitlines() if q.strip()]
+        if not title or not questions:
+            error = "Give the interview a title and at least one question."
+        else:
+            token = create_custom_interview(title, questions)
+            new_link = url_for('interview_link', token=token, _external=True)
+
+    registry = _load_registry()
+    interviews = sorted(
+        ({"token": t, **v} for t, v in registry.items()),
+        key=lambda x: x.get("created_at", 0), reverse=True,
+    )
+    for it in interviews:
+        it["link"] = url_for('interview_link', token=it["token"], _external=True)
+
+    return render_template('admin_interviews.html', interviews=interviews,
+                           error=error, new_link=new_link)
+
+
+@app.route('/i/<token>')
+def interview_link(token):
+    """Public entry point for an admin-created, shareable interview link."""
+    entry = get_custom_interview(token)
+    if entry is None:
+        return render_template('link_start.html', title=None, token=token), 404
+    return render_template('link_start.html', title=entry["title"], token=token)
 
 
 @app.route('/admin/session/<int:row_id>')

@@ -343,8 +343,11 @@ class _CloseLineWriter(BaseAgent):
             f"{_format_loose_ends(loose_ends)}\n\n"
             "Write a one-sentence question offering the respondent the choice to "
             "keep going or wrap up. If there is a specific unexplored thread worth "
-            "naming, mention it briefly (\"…we haven't touched on X — do you want to "
-            "get into that, or wrap up here?\"). Otherwise ask cleanly. No preamble, "
+            "naming, mention it briefly. PREFER threads tagged [respondent] — the "
+            "respondent already hinted at these and naming them lands harder. Only "
+            "reach for a [briefing] thread if no respondent-sourced one exists. "
+            "Format: \"You mentioned X but we didn't get into <specifics> — do you "
+            "want to say more, or wrap up here?\" Otherwise ask cleanly. No preamble, "
             "no quotes, no lists. Output ONLY the line."
         )
         return await self._call(prompt, label="offer")
@@ -394,10 +397,18 @@ class _CloseLineWriter(BaseAgent):
 def _format_loose_ends(loose_ends: list) -> str:
     if not loose_ends:
         return "(none)"
+    # Respondent-sourced loose ends are stronger — the respondent already hinted
+    # at these, so naming them lands harder than surfacing a briefing fact they
+    # never mentioned. Sort them to the top.
+    def _rank(le: dict) -> int:
+        return 0 if (le.get("source") or "").lower() == "respondent" else 1
+    ranked = sorted(loose_ends[:12], key=_rank)
     lines = []
-    for le in loose_ends[:6]:
+    for le in ranked[:6]:
         thread = (le.get("thread") or "").strip()
         why = (le.get("why_worth_pulling") or "").strip()
+        src = (le.get("source") or "").strip().lower()
+        tag = f" [{src}]" if src in ("respondent", "briefing") else ""
         if thread:
-            lines.append(f"- {thread}" + (f" — {why}" if why else ""))
+            lines.append(f"- {thread}{tag}" + (f" — {why}" if why else ""))
     return "\n".join(lines) if lines else "(none)"

@@ -76,6 +76,32 @@ def _strip_repeatedly(pattern: re.Pattern, text: str, max_iters: int = 4) -> tup
     return (cleaned if cleaned else text), fired
 
 
+# Mid-sentence service-register phrases the leading-anchored strippers miss:
+# e.g. "Hello, and thank you for joining/being here/sharing/taking the time/coming"
+# Stop at the next punctuation — do not devour into the next clause.
+# Detect (don't strip) mid-sentence service register. The leading-anchored
+# strippers can't safely edit mid-sentence patterns without breaking grammar,
+# so we flag detection instead and let the interviewer's regen loop rewrite
+# the whole turn.
+_MIDSENTENCE_SERVICE_REGISTER = re.compile(
+    r"\bthank(?:s| you)(?:\s+(?:so|very)\s+much)?\s+for\s+"
+    r"(?:joining|being\s+(?:here|with\s+us)|sharing|coming|"
+    r"taking\s+(?:the\s+)?time|having\s+me|making\s+time|meeting\s+with\s+me)\b",
+    re.IGNORECASE,
+)
+_MIDSENTENCE_APPRECIATION = re.compile(
+    r"\bi\s+(?:really\s+|truly\s+)?appreciate\s+"
+    r"(?:you\b|your\s+(?:time|willingness|insights?|thoughts?|openness))",
+    re.IGNORECASE,
+)
+
+
+def _detect_midsentence_service(text: str) -> bool:
+    """True if the turn contains mid-sentence service register we can't safely strip."""
+    return bool(_MIDSENTENCE_SERVICE_REGISTER.search(text or "")
+                or _MIDSENTENCE_APPRECIATION.search(text or ""))
+
+
 def sanitize_interviewer_turn(text: str) -> tuple[str, list]:
     """Strip sycophantic openers and closing pleasantries. Returns (clean, flags).
 
@@ -95,6 +121,10 @@ def sanitize_interviewer_turn(text: str) -> tuple[str, list]:
             flags.append("closing")
         if not aff and not clo:
             break
+    # Mid-sentence service register we can't safely strip is detected here so
+    # `inspect_turn` can force a regeneration rather than emitting broken text.
+    if _detect_midsentence_service(cleaned):
+        flags.append("midsentence_service")
     return (cleaned if cleaned.strip() else text), flags
 
 
@@ -177,6 +207,10 @@ def inspect_turn(text: str) -> TurnInspection:
         violations.append("stance")
     if detect_advice(clean):
         violations.append("advice")
+    # Mid-sentence "thank you for joining/appreciate your time" is a violation:
+    # the leading-anchored strippers can't safely edit it, so we regen.
+    if "midsentence_service" in flags:
+        violations.append("midsentence_service")
     return TurnInspection(
         clean_text=clean,
         flags=flags,
@@ -189,10 +223,12 @@ def inspect_turn(text: str) -> TurnInspection:
 REGEN_REMINDER = (
     "\n\n[GUARDRAIL — your previous draft violated the interviewer stance "
     "({violations}). Rewrite it as ONE neutral, open-ended question only. "
-    "Do NOT evaluate, affirm, praise, or thank the respondent. Do NOT state your "
-    "own opinion, belief, or stance. Do NOT give advice or recommendations. Do NOT "
-    "answer any question they asked you — if they asked you something, simply ask "
-    "your next question. Output only the question.]"
+    "Do NOT evaluate, affirm, praise, or thank the respondent. Do NOT say "
+    "'thank you for joining/being here/sharing/taking the time', 'appreciate "
+    "your...', 'we appreciate' — no service-register openers of any kind. "
+    "Do NOT state your own opinion, belief, or stance. Do NOT give advice or "
+    "recommendations. Do NOT answer any question they asked you — if they "
+    "asked you something, simply ask your next question. Output only the question.]"
 )
 
 

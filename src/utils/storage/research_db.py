@@ -15,6 +15,14 @@ from typing import List, Optional
 
 logger = logging.getLogger("research_db")
 
+
+class StorageUnavailable(Exception):
+    """Raised when a live-session read fails for a transient reason (dropped
+    serverless-Postgres connection, timeout, etc.) as opposed to the row simply
+    not existing. Callers should treat this as retryable, NOT as "session gone."
+    """
+
+
 _engine = None
 _engine_lock = threading.Lock()
 _schema_ready = False
@@ -278,7 +286,12 @@ def save_web_session(token: str, meta: dict, state: dict, files: bytes,
 
 
 def read_and_clear_outbox(token: str):
-    """Return (messages, status) for a token and empty its outbox. Cheap poll path."""
+    """Return (messages, status) for a token and empty its outbox. Cheap poll path.
+
+    Returns None only when the row genuinely does not exist. Raises
+    StorageUnavailable on a transient DB failure so the caller can keep the
+    session alive and retry instead of declaring it expired.
+    """
     engine = _get_engine()
     if engine is None or not _ensure_schema(engine):
         return None
@@ -300,11 +313,15 @@ def read_and_clear_outbox(token: str):
         return (outbox or []), status
     except Exception as e:
         logger.warning(f"read_and_clear_outbox failed for {token}: {e}")
-        return None
+        raise StorageUnavailable(str(e)) from e
 
 
 def get_web_session(token: str):
-    """Return (meta, state, files) for a token, or None if not found."""
+    """Return (meta, state, files) for a token, or None if not found.
+
+    Raises StorageUnavailable on a transient DB failure (vs. None for a token
+    that truly isn't there) so a turn isn't wrongly reported as expired.
+    """
     engine = _get_engine()
     if engine is None or not _ensure_schema(engine):
         return None
@@ -322,7 +339,7 @@ def get_web_session(token: str):
         return meta, state, files
     except Exception as e:
         logger.warning(f"get_web_session failed for {token}: {e}")
-        return None
+        raise StorageUnavailable(str(e)) from e
 
 
 # ---- admin read helpers ----

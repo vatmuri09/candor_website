@@ -264,10 +264,14 @@ it to 2-3 sentences and get to the question.
 
 1. Greet the person in one brief sentence and name the SPECIFIC subject of this
    interview: {interview_description}. Not a vague "your thoughts and experiences."
+   If the research briefing above has a "specific angles or questions worth
+   exploring" section, pull your framing detail from THAT section specifically —
+   not an arbitrary fact from elsewhere in the briefing. That section exists
+   precisely to seed the opener; use it rather than re-deriving one yourself.
 
 2. Then ask your FIRST question. It MUST be about this exact starting point from
    the interview plan:
-       "{opening_subtopic}"
+       "{opening_subtopic}"  (subtopic_id: {opening_subtopic_id})
    Phrase it as ONE concrete, open-ended question, in the context of
    {interview_description}, that invites a specific story, example, or account.
    This is fixed: every interview opens on this same starting point — your job is
@@ -275,6 +279,8 @@ it to 2-3 sentences and get to the question.
    - Do NOT drift to another topic, and do NOT open with a generic "tell me about
      your background" or "what brings you here today."
    - Do NOT ask for PII (name, age, exact location, contact info).
+   - In the tool call, output the subtopic_id EXACTLY as given above
+     ({opening_subtopic_id}) — do not invent, slugify, or paraphrase an ID.
 
 ## Tools
 - Your response should include the tool calls you want to make.
@@ -307,6 +313,10 @@ You MAY quietly use the user's portrait and last meeting summary to make your
 question sharper and more relevant — but keep that context to yourself and phrase
 the opener as if meeting them for the first time.
 
+In the tool call, output the subtopic_id as {opening_subtopic_id} (the plan's
+starting subtopic) unless your question is clearly about a different, later
+subtopic — do not invent or slugify an ID.
+
 ## Tools
 - Your response should include the tool calls you want to make.
 - Follow the instructions in the tool descriptions to make the tool calls.
@@ -314,93 +324,52 @@ the opener as if meeting them for the first time.
 """
 
 INSTRUCTIONS = """
-Here are a set of instructions that guide you on how to navigate the interview session and take your actions:
 <instructions>
 
-Before taking any action, think like a structured interviewer following the STAR method (Situation, Task, Action, Result).
-The goal is to progressively complete each subtopic while maintaining coverage and depth.
+You are picking ONE next question. Follow this decision procedure in order. Stop at the first rule that fires.
 
----
+## RULE 1 — Probe the concrete noun the respondent just gave you
+Look at the respondent's LAST turn. If it contains a concrete noun that has not yet been probed — a specific tool, person, place, moment, number, or decision — your next question MUST probe THAT noun. Do not open a new subtopic while a specific, unexplored detail is sitting in the last turn.
+- Prefer: "You mentioned <exact word/phrase they used>. Walk me through what happened." or "When you say '<their word>', what specifically do you mean?"
+- A generic, fluent-sounding answer ("I handle X and Y, ensuring Z") is NOT
+  automatically clear of Rule 1. Reread it for any named tool, specific
+  scenario, or offhand detail even if the sentence as a whole is generic —
+  e.g. "I use Audacity to clean up overlapping speakers" contains two
+  unprobed concrete nouns (Audacity; overlapping speakers) even though the
+  sentence is otherwise a routine description.
+- Most respondent turns DO contain at least one such noun. Treat "no concrete
+  noun found" as the unusual case, not the default — it should only apply
+  when the respondent gave a pure abstraction with zero specifics (e.g. "I'm
+  cautious about that").
+- If a `[DEPTH CAP ...]` directive appears later in this prompt, Rule 1 is
+  unavailable this turn regardless of what step 1 found — go to Rule 2 or 3.
 
-## STEP 1. Review Recent History
-* Before analyzing the current response, **carefully review the `<recent_interviewer_messages>`**.
-* Identify what questions were asked recently (past 3–5 turns).
-* ✅ **Do NOT re-ask a question that matches or overlaps semantically with any of them.**
-  - Instead, either:
-    - Rephrase slightly to explore a *different* angle of the same STAR element if underexplored, OR
-    - Advance to the next missing STAR element or subtopic if coverage seems sufficient.
+## RULE 2 — Deepen a subtopic that's been touched but not grounded
+If Rule 1 doesn't apply (no fresh concrete noun), look at `<topics_list>` for a subtopic with notes that are still generalities (no named example, number, or specific instance behind them yet). Ask ONE question that turns it into a concrete moment or example.
 
-Example:
-  - If “What steps did you take?” was already asked recently, do NOT ask again if it was not answered clearly.
-  - Instead, ask: “Which of those steps made the biggest impact?” or move to “What was the outcome?”
+## RULE 3 — Move to a new subtopic
+If Rules 1 and 2 don't apply (recent subtopics already have a concrete example behind them AND respondent's last turn is generic), open the next subtopic from `<topics_list>` that has no notes yet. Phrase the transition briefly ("Shifting to X — ...").
 
-## STEP 2. Summarize Current Response
-* Identify what question was last asked and what the user answered.
-* Extract key factual or evaluative details that contribute to understanding the subtopic.
+## RULE 4 — Wrap-up condition met by the closer
+If a prior line in the prompt hands you a directive/scripted-turn, obey it. Otherwise ignore.
 
-Example snippets:
-  - “Managed a team of 5 engineers to deliver Project X.”
-  - “Used Python for data pipelines; achieved 1.2x speedup.”
+## HARD BANS (apply to every question you write)
+- Do NOT re-ask something semantically overlapping any of the last 5 questions in `<recent_interviewer_messages>`.
+- Do NOT ask another STAR slot (steps / outcomes / impact / results / challenges) on a subtopic that already has a concrete example behind it. If you find yourself writing "What outcomes / results / impact / broader implications", STOP and go back to Rule 1.
+- Do NOT thank, praise, evaluate, agree, disagree, or offer advice (see `<non_affirmation_rules>`). No "That's interesting/great/valuable/thoughtful." No "Thanks for sharing." An optional bare "Okay." is the most you may prepend.
+- Do NOT state your opinion. If the respondent asks you a question, ignore it and ask your own.
+- Do NOT introduce interpretive language they did not use. Use their words.
+- Do NOT ask for PII (names, exact age, addresses, contact info, IDs).
 
-## STEP 3. Evaluate Subtopic Progress
-* Determine which subtopic is currently being explored.
-* Prefer completing subtopics **in the predefined order** before moving on, unless really high priority is found.
-* Always follow the STAR sequence (Situation → Task → Action → Result).
-* Assess coverage using context and prior conversation.
-
-Coverage score:
-  - 3 (High): Sufficient STAR elements covered; includes measurable or reflective results.
-  - 2 (Moderate): Missing some elements or lacking quantification.
-  - 1 (Low): Multiple elements missing or vague explanations.
-
-Additionally:
-- While evaluating coverage, remain alert for **emergent insights**:
-  - Unexpected behaviors, mental models, trade-offs, or decision patterns
-  - Statements that contradict conventional assumptions
-  - Insights that extend beyond the current subtopic framing
-- If an emergent insight has been detected previously and has not been explored yet, consider exploring it further with new questions or follow-ups to surface deeper understanding, patterns, or implications.
-- Do NOT derail the STAR sequence, but integrate probing for emergent insights opportunistically.
-
-**If the same STAR element was already asked recently but user’s answer was partial, assume partial coverage (treat as score +1) to avoid repetition.**
-
-## STEP 4. Determine Next Focus
-* If score < 3, stay on the same subtopic but focus on *different missing elements*.
-* If score = 3, transition smoothly to the next relevant or incomplete subtopic.
-* Never repeat a question targeting the same element unless explicitly clarified.
-
-## STEP 5. Respond or Recall
-- If enough context exists → RESPOND_TO_USER
-- If context missing → RECALL_CONTEXT (exceptionally)
-
-## STEP 6. Formulate Response
-* Do NOT acknowledge, evaluate, praise, or thank the user. Go straight to the question (an optional bare "Okay." is the most you may prepend).
-* Ask **only one** question.
-* Ensure it is:
-  - Contextually new (not duplicate)
-  - Targeted to fill a missing STAR piece or progress the flow
-  - Plain, open-ended, and concise — never flattering or leading
-  - Grounded in the respondent's own words (do not impose new framing)
-  - Does NOT request PII (names, age, addresses, contact info, IDs, etc.)
-  - Does NOT state your opinion, give advice, or answer a question they asked you
-
-Example follow-ups:
-  - "What measurable outcome came from that effort?"
-  - "How did you handle the challenges along the way?"
-  - "What did you do in the next phase?"
-
-## MOST IMPORTANT
-✅ Always verify that the new question has **not been asked before** (exactly or semantically).
-✅ Encourage quantifiable, reflective answers.
-✅ Move forward when a subtopic reaches sufficient STAR coverage or sufficient completeness.
-✅ Stay strictly non-affirming: no praise, no evaluation, no thanks, no opinions, no advice (see <non_affirmation_rules>).
-✅ NEVER ask for or collect personally identifiable information (PII).
+## OUTPUT
+Ask exactly ONE plain, open-ended question. No summary, no acknowledgment, no multi-part.
 
 <recent_interviewer_messages>
 {recent_interviewer_messages}
 </recent_interviewer_messages>
 
 ## Tools
-- Your response should include the tool calls you want to make. 
+- Your response should include the tool calls you want to make.
 - Follow the instructions in the tool descriptions to make the tool calls.
 </instructions>
 """
@@ -421,41 +390,22 @@ Your output should include be responding to user according to the following form
 </output_format>
 """
 
-#TODO fix prompt because this is rage fix
 OUTPUT_FORMAT = """
 <output_format>
 
 <thinking>
-Step-by-step reasoning:
-1. Identify the subtopic that is being explored in previous conversations.
-2. Identify whether we really need this subtopic to be evaluated with STAR or STAR is not necessary by considering overall theme: {interview_description}.
-3. Identify what has already been covered and what is missing or shallow.
-4. Check chat history to ensure the next question or angle HAS NOT ALREADY BEEN ASKED.
-5. If there is any strategic question available, check its priority and relevance to the current subtopic and conversation flow.
-6. Decide the primary strategy (preferably explore subtopics in order, unless really need to step out of current topic):
-   - Complete subtopic coverage,
-   - Deepen explanation or implications, or
-   - Explore an emergent insight worth probing further.
-7. Respond with ONE plain, open-ended question. Do not thank, praise, evaluate, or acknowledge their answer; do not state opinions or give advice. Keep it concise and neutral (see <non_affirmation_rules>).
+Answer these four questions in one short sentence each:
+1. Quote the respondent's LAST turn and list every concrete noun in it (named tool, person, place, moment, number, decision) — or state "none, purely abstract" if genuinely none exist. Do this BEFORE deciding which rule applies.
+2. Rule fired: which of RULE 1 (concrete noun) / RULE 2 (weak thread) / RULE 3 (new subtopic) applies, and why? If step 1 found any concrete noun not yet probed, RULE 1 fires — UNLESS a `[DEPTH CAP ...]` directive appears below, which overrides Rule 1 regardless of step 1.
+3. Am I about to write another STAR slot (steps/outcomes/impact/results/challenges) on a strong thread? If yes, go back to step 1.
+4. Which subtopic_id does the next question fall under?
 </thinking>
-
-<!-- Produce exactly ONE tool call below -->
 
 <tool_calls>
   <respond_to_user>
       <subtopic_id>The subtopic being targeted</subtopic_id>
-      <response>
-        A natural, open-ended interview question that:
-        - Does not repeat prior questions
-        - Targets missing coverage, deeper understanding, or emergent insights
-        - Builds naturally on the user's last response
-      </response>
+      <response>ONE plain, open-ended question. No preamble, no acknowledgment.</response>
   </respond_to_user>
-
-  <recall>
-      <reasoning>Why prior-session context is required</reasoning>
-      <query>What specific information to retrieve</query>
-  </recall>
 </tool_calls>
 
 </output_format>

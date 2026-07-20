@@ -7,7 +7,6 @@
 flask==3.1.2
 flask-cors==6.0.1
 
-# OpenAI + LangChain (the models we run in production)
 openai==1.54.0
 langchain-core==0.3.15
 langchain-openai==0.2.5

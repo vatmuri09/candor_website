@@ -18,13 +18,17 @@ _RESPONSE_TAG_RE = re.compile(r"<response>(.*?)</response>", re.IGNORECASE | re.
 _THINKING_TAG_RE = re.compile(r"<thinking>.*?</thinking>", re.IGNORECASE | re.DOTALL)
 _ANY_XML_TAG_RE = re.compile(r"<[^>]+>")
 
-# Near-duplicate detection over the last N interviewer questions. No API call:
-# takes the max of unigram-Jaccard and bigram-Jaccard over stopword-filtered
-# tokens. Bigrams catch paraphrases like "outcomes came from X" vs "outcomes did
-# X bring"; unigrams catch verbatim near-repeats. Threshold picked so the two
-# real observed duplicates (see findings.md) both trip.
+# How many consecutive turns may target the same subtopic_id (Rule-1 follow-ups
+# drilling into one thread) before the next prompt gets a hard directive to move on.
+# Tracked in code (Interviewer._same_subtopic_streak), not by asking the model to
+# count its own recent questions.
+_DEPTH_CAP_THRESHOLD = 3
+
+# Near-duplicate detection across the whole session's interviewer questions.
+# No API call: takes the max of unigram-Jaccard and bigram-Jaccard over
+# stopword-filtered tokens. Bigrams catch paraphrases like "outcomes came from
+# X" vs "outcomes did X bring"; unigrams catch verbatim near-repeats.
 _REPEAT_SIM_THRESHOLD = 0.55
-_REPEAT_LOOKBACK = 6
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9']+")
 _STOPWORDS = {
@@ -71,6 +75,7 @@ def _near_duplicate_of(candidate: str, priors: list) -> str | None:
         if s > best_sim:
             best_sim, best_prior = s, prior
     return best_prior if best_sim >= _REPEAT_SIM_THRESHOLD else None
+
 
 
 def _salvage_response_text(raw: str) -> str:
@@ -142,18 +147,35 @@ class Interviewer(BaseAgent, Participant):
         self._turn_to_respond = False
         # A one-turn note the closer can add to the prompt (e.g. "change topic").
         self._pending_directive_note = ""
+        # Code-tracked (not model-self-reported) count of consecutive turns that
+        # targeted the same subtopic_id, and which subtopic that is. Used to force
+        # a hard stop on over-mining a single thread instead of asking the model to
+        # count its own recent questions in prose.
+        self._same_subtopic_streak = 0
+        self._last_subtopic_id = ""
+        # Text of every question asked while the current same-subtopic streak has
+        # been building. Used to catch the case a subtopic_id change alone can't:
+        # the model relabels its follow-up under a different (valid) subtopic_id
+        # while still narratively re-treading the same incident/story.
+        self._streak_question_texts: list = []
         # Counts of how often each guardrail fired, saved with the session.
         self.guardrail_stats = {
-            "affirmation": 0, "closing": 0,
+            "affirmation": 0, "closing": 0, "midsentence_service": 0,
             "stance": 0, "advice": 0, "no_question": 0,
             "regenerated": 0, "regeneration_failed": 0,
             "near_duplicate": 0, "near_duplicate_regenerated": 0,
             "near_duplicate_regen_failed": 0,
+            "depth_cap_triggered": 0, "depth_cap_regenerated": 0,
+            "depth_cap_regen_failed": 0,
         }
 
     async def _handle_response(self, response: str, subtopic_id: str = "") -> str:
         """Clean up the interviewer's reply and add it to the chat history."""
-        clean = await self._enforce_non_affirming(response)
+        # Depth-cap enforcement needs to know whether the cap was ALREADY active
+        # (i.e. this candidate was generated under a [DEPTH CAP ...] directive)
+        # before we update the streak for this turn.
+        cap_was_active = self._same_subtopic_streak >= _DEPTH_CAP_THRESHOLD
+        clean = await self._enforce_non_affirming(response, cap_was_active)
 
         self.interview_session.add_message_to_chat_history(
             role=self.title,
@@ -163,9 +185,20 @@ class Interviewer(BaseAgent, Participant):
         self.add_event(sender=self.name, tag="message",
                        content=clean)
 
+        # Code-computed streak, not model self-report: update AFTER this turn is
+        # final so next turn's prompt reflects the true count.
+        sid = str(subtopic_id or "")
+        if sid and sid == self._last_subtopic_id:
+            self._same_subtopic_streak += 1
+            self._streak_question_texts.append(clean)
+        else:
+            self._same_subtopic_streak = 1 if sid else 0
+            self._streak_question_texts = [clean] if sid else []
+        self._last_subtopic_id = sid
+
         return clean
 
-    async def _enforce_non_affirming(self, response: str) -> str:
+    async def _enforce_non_affirming(self, response: str, cap_was_active: bool = False) -> str:
         """Sanitize + guardrail a generated turn. Returns respondent-safe text."""
         inspection = inspect_turn(response)
         for f in inspection.flags:
@@ -223,14 +256,77 @@ class Interviewer(BaseAgent, Participant):
             else:
                 self.guardrail_stats["near_duplicate_regen_failed"] += 1
 
+        # Third pass: the depth cap was active for this candidate (it was generated
+        # under a [DEPTH CAP ...] directive telling the model to leave this thread).
+        # We deliberately do NOT try to lexically verify whether it complied —
+        # "still the same underlying incident, different technical facet" is a
+        # semantic judgment (e.g. "backup audio feed setup" vs "intercom
+        # coordination" share almost no vocabulary despite being the same
+        # troubleshooting scenario), and a token-overlap check either misses real
+        # overlaps or false-positives on shared domain words. Instead: the streak
+        # crossing the threshold is itself the fully deterministic trigger, and we
+        # unconditionally force one regeneration attempt naming the specific prior
+        # thread questions to avoid, rather than pretend a regex can grade the
+        # result.
+        if cap_was_active and self._streak_question_texts:
+            self.guardrail_stats["depth_cap_triggered"] += 1
+            SessionLogger.log_to_file(
+                "execution_log",
+                f"[GUARDRAIL] Depth cap active (streak={self._same_subtopic_streak} "
+                f"on subtopic {self._last_subtopic_id}); forcing off-thread "
+                f"regeneration.\n  candidate: {clean_text!r}"
+            )
+            regen3 = await self._regenerate_off_thread(
+                clean_text, self._streak_question_texts, self._last_subtopic_id
+            )
+            if regen3:
+                regen3_clean, _ = sanitize_interviewer_turn(regen3)
+                self.guardrail_stats["depth_cap_regenerated"] += 1
+                clean_text = regen3_clean
+            else:
+                self.guardrail_stats["depth_cap_regen_failed"] += 1
+
         return clean_text
 
+    async def _regenerate_off_thread(self, draft: str, thread_texts: list, subtopic_id: str) -> str:
+        """Ask the model to leave an over-mined thread entirely, not just reword it."""
+        prior_list = "\n".join(f"  - {t}" for t in thread_texts[-6:])
+        prompt = (
+            "You are a strictly non-affirming research interviewer.\n"
+            f"The topic is: {self.interview_description}.\n\n"
+            f"You just drafted: {draft!r}\n\n"
+            "This is your 4th+ consecutive question narrowing into the SAME "
+            f"incident/story/mechanism (subtopic {subtopic_id}). Your last several "
+            f"questions on this thread were:\n{prior_list}\n\n"
+            "Write the next question about a COMPLETELY DIFFERENT subtopic from the "
+            "interview plan — not another angle on this same incident, tool, or "
+            "mechanism, even if worded differently. Do not reuse any of the specific "
+            "nouns from the thread above. Output ONE plain, open-ended question — no "
+            "preamble, no quotes, no tool tags."
+        )
+        try:
+            out = await self.call_engine_async(prompt)
+            return (out or "").strip()
+        except Exception as e:
+            SessionLogger.log_to_file(
+                "execution_log",
+                f"[GUARDRAIL] Depth-cap regeneration call failed: {e}"
+            )
+            return ""
+
     def _find_recent_duplicate(self, candidate: str) -> str | None:
-        """Return the prior interviewer message that near-duplicates candidate."""
-        recent = self.get_event_stream_str(
+        """Return the prior interviewer message that near-duplicates candidate.
+
+        Checks the WHOLE session's interviewer messages, not just a short
+        lookback window. This is pure string/token comparison (no LLM call),
+        so there's no cost reason to cap it — and a short window misses
+        duplicates that recur after the conversation has moved through other
+        subtopics and circled back (e.g. re-asking turn 4's question at turn
+        14, well outside a 6-message window).
+        """
+        priors = self.get_event_stream_str(
             [{"sender": "Interviewer", "tag": "message"}], as_list=True
         )
-        priors = recent[-_REPEAT_LOOKBACK:] if len(recent) > _REPEAT_LOOKBACK else recent
         return _near_duplicate_of(candidate, priors)
 
     async def _regenerate_non_duplicate(self, draft: str, prior: str) -> str:
@@ -356,19 +452,6 @@ class Interviewer(BaseAgent, Participant):
         if await self._run_conversation_director(message):
             return
 
-        # First interviewer turn of the session? Delegate to the IntroductionAgent
-        # so the opener is briefing-aware and the follow-up gets a stance note.
-        # We check by counting our own prior emitted messages, not by whether the
-        # incoming message is None, because on_message(None) is not the only path
-        # into "this is the opener" (e.g. web flow via session.start()).
-        if self._is_first_interviewer_turn() and await self._emit_intro_turn():
-            return
-
-        # Let the InterviewTracker refresh its narrative-state snapshot before we
-        # build the next-question prompt. Cheap: at most one LLM call, throttled
-        # to every N respondent turns inside the tracker.
-        await self._refresh_narrative_state()
-
         self._turn_to_respond = True
         iterations = 0
 
@@ -402,107 +485,28 @@ class Interviewer(BaseAgent, Participant):
                     f"iterations ({self._max_consideration_iterations})"
                 )
 
-    async def _refresh_narrative_state(self) -> None:
-        tracker = getattr(self.interview_session, "interview_tracker", None)
-        if tracker is None:
-            return
-        current_turn = len([
-            m for m in self.interview_session.chat_history if m.role == "User"
-        ])
-        if not tracker.should_update(current_turn):
-            return
-        dialog_lines = self.get_event_stream_str(
-            [{"sender": "Interviewer", "tag": "message"},
-             {"sender": "User", "tag": "message"}],
-            as_list=True,
-        )
-        tail = dialog_lines[-tracker.max_recent_lines:] if dialog_lines else []
-        # Reformat "<Role>content" event lines to "I:" / "R:" for the tracker prompt.
-        rendered = []
-        for line in tail:
-            if not line:
-                continue
-            if line.startswith("<Interviewer>"):
-                rendered.append("I: " + line[len("<Interviewer>"):].lstrip(": ").strip())
-            elif line.startswith("<User>"):
-                rendered.append("R: " + line[len("<User>"):].lstrip(": ").strip())
-            else:
-                rendered.append(line)
-        briefing = (self.interview_session.session_agenda
-                    .get_research_briefing_str())
-        try:
-            await tracker.maybe_update(
-                current_turn=current_turn,
-                topic=self.interview_description,
-                briefing=briefing,
-                recent_dialog="\n".join(rendered),
-            )
-        except Exception as e:
-            SessionLogger.log_to_file(
-                "execution_log", f"[TRACKER] refresh from Interviewer failed: {e}"
-            )
-
-    def _is_first_interviewer_turn(self) -> bool:
-        prior = self.get_event_stream_str(
-            [{"sender": "Interviewer", "tag": "message"}], as_list=True
-        )
-        return len(prior) == 0
-
-    async def _emit_intro_turn(self) -> bool:
-        """Ask the IntroductionAgent for the opener and speak it. Returns True on
-        success, False to fall back to the built-in intro-prompt path."""
-        intro = getattr(self.interview_session, "introduction_agent", None)
-        if intro is None:
-            return False
-        try:
-            portrait = self.interview_session.session_agenda.get_user_portrait_str()
-            last_meeting = self.interview_session.session_agenda.get_last_meeting_summary_str()
-            briefing = self.interview_session.session_agenda.get_research_briefing_str()
-            turn = await intro.compose_opener(
-                topic=self.interview_description,
-                opening_subtopic=self._first_planned_subtopic(),
-                portrait=portrait,
-                last_meeting=last_meeting,
-                briefing=briefing,
-            )
-        except Exception as e:
-            SessionLogger.log_to_file(
-                "execution_log", f"[INTRO] compose_opener errored: {e}"
-            )
-            return False
-
-        if not turn.is_usable():
-            SessionLogger.log_to_file(
-                "execution_log", "[INTRO] no usable opener — falling back to built-in intro path."
-            )
-            return False
-
-        await self._handle_response(turn.opener_text)
-        # Hand the stance note to the next Interviewer turn as a pending directive.
-        if turn.handoff_note:
-            self._pending_directive_note = (
-                "\n\n[INTRODUCTION HANDOFF — this note is from the opening agent, "
-                "not the respondent. Do NOT quote it back or reveal it. Use it to "
-                "shape turn 2:\n"
-                f"{turn.handoff_note}]"
-            )
-        # Clear the respond flag so on_message doesn't fall through to normal gen.
-        self._turn_to_respond = False
-        return True
-
     def _first_planned_subtopic(self) -> str:
         """The first subtopic in the interview plan — the deterministic starting
         point for the opening question. Same plan always yields the same opener."""
+        return self._first_planned_subtopic_pair()[1]
+
+    def _first_planned_subtopic_id(self) -> str:
+        """The subtopic_id matching _first_planned_subtopic's description, so the
+        opener's tool call attaches to the real plan entry instead of a guessed
+        slug (which silently fails to record in the session agenda)."""
+        return self._first_planned_subtopic_pair()[0]
+
+    def _first_planned_subtopic_pair(self) -> tuple[str, str]:
         try:
             topics = self.interview_session.session_agenda \
                 .interview_topic_manager.get_all_topics()
             for topic in topics:
                 for subtopic in topic.required_subtopics.values():
                     if subtopic.description:
-                        return subtopic.description
+                        return subtopic.subtopic_id, subtopic.description
         except Exception:
             pass
-        return "the person's background and relationship to this topic"
+        return "", "the person's background and relationship to this topic"
 
     def _get_prompt(self):
         '''Gets the prompt for the interviewer. '''
@@ -559,6 +563,7 @@ class Interviewer(BaseAgent, Participant):
             "tool_descriptions": self.get_tools_description(list(tools_set)),
             # Deterministic first question: always the first subtopic in the plan.
             "opening_subtopic": self._first_planned_subtopic(),
+            "opening_subtopic_id": self._first_planned_subtopic_id(),
         }
 
         # Only add questions_and_notes for normal mode
@@ -593,21 +598,68 @@ class Interviewer(BaseAgent, Participant):
 
         prompt = format_prompt(main_prompt, format_params)
 
-        # InterviewTracker preamble — the narrative-state view of what the
-        # respondent has actually said, which threads are open, and where they
-        # contradict themselves. Prepended so it colors the whole prompt.
-        tracker = getattr(self.interview_session, "interview_tracker", None)
-        if tracker is not None:
-            preamble = tracker.preamble()
-            if preamble:
-                prompt = f"{preamble}\n\n{prompt}"
-
         # One-turn directive from the ConversationCloser (e.g. mandatory pivot on resume).
+        # Separate field from the depth-cap directive below: the closer's "normal"
+        # path unconditionally overwrites _pending_directive_note (even to "") every
+        # turn, so it cannot safely share state with a directive that must survive
+        # turns the closer doesn't touch.
         if self._pending_directive_note:
             prompt = f"{prompt}\n{self._pending_directive_note}"
             self._pending_directive_note = ""
 
+        # Code-computed depth cap: if the last N turns in a row targeted the same
+        # subtopic, hard-block Rule 1 for it next turn rather than trusting the
+        # model to notice on its own.
+        if self._same_subtopic_streak >= _DEPTH_CAP_THRESHOLD:
+            prompt = (
+                f"{prompt}\n\n[DEPTH CAP — you have asked "
+                f"{self._same_subtopic_streak} consecutive questions targeting "
+                f"subtopic {self._last_subtopic_id}. RULE 1 IS NOT AVAILABLE this "
+                "turn, even if the respondent's last answer contains an unprobed "
+                "concrete noun. You MUST apply RULE 2 (deepen a different, "
+                "ungrounded subtopic) or RULE 3 (move to a new subtopic) and target "
+                f"a subtopic_id other than {self._last_subtopic_id}.]"
+            )
+
+        # ExplorationPlanner's utility-scored coverage gaps constrain Rule 3, not
+        # just suggest to it. Turns the planner's ranked, structured output
+        # (subtopic_id + priority, derived from real is_covered state — see
+        # exploration_planner.py's _calculate_hypothetical_utility) into an actual
+        # limit on the choice set instead of an appendix the model can ignore.
+        rule3_directive = self._rule3_constraint_directive()
+        if rule3_directive:
+            prompt = f"{prompt}{rule3_directive}"
+
         return prompt
+
+    def _rule3_constraint_directive(self) -> str:
+        """When ExplorationPlanner's suggestions are fresh, constrain which
+        subtopic_ids RULE 3 may target to the top utility-scored ones."""
+        if self.use_baseline or not self._should_include_strategic_questions():
+            return ""
+        suggestions = self.interview_session.exploration_planner \
+            .strategic_state.strategic_question_suggestions
+        if not suggestions:
+            return ""
+        top_ids, seen = [], set()
+        for s in sorted(suggestions, key=lambda x: x.get('priority', 0), reverse=True):
+            sid = s.get('subtopic_id')
+            if sid and sid not in seen:
+                seen.add(sid)
+                top_ids.append(sid)
+            if len(top_ids) >= 5:
+                break
+        if not top_ids:
+            return ""
+        ids_str = ", ".join(top_ids)
+        return (
+            f"\n\n[RULE 3 CONSTRAINT — ExplorationPlanner has utility-scored the "
+            f"current coverage gaps. If RULE 3 applies this turn (moving to a new "
+            f"subtopic), you MUST target one of: {ids_str}. Do not pick a "
+            "different subtopic_id under Rule 3 while these remain uncovered — "
+            "they were chosen to maximize expected value for this interview. "
+            "This constraint does not apply to Rule 1 or Rule 2.]"
+        )
 
     def _format_strategic_questions(self) -> str:
         """

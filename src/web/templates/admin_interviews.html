@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Create an interview — SparkMe Admin</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      margin: 0; background: #f5f4fb; color: #1b1730;
+    }
+    header {
+      background: linear-gradient(135deg, #241f5c, #4b3ad6); color: #fff;
+      padding: 18px 28px; display: flex; justify-content: space-between; align-items: center;
+    }
+    header .brand { font-weight: 800; font-size: 17px; letter-spacing: -.01em; }
+    header nav { display: flex; gap: 20px; align-items: center; }
+    header nav a { color: #d9d4ff; text-decoration: none; font-size: 14px; font-weight: 600; }
+    header nav a.active, header nav a:hover { color: #fff; }
+    .wrap { max-width: 920px; margin: 0 auto; padding: 32px 24px 60px; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 24px; }
+    @media (min-width: 860px) { .grid { grid-template-columns: 1fr 1fr; } }
+    .card {
+      background: #fff; border-radius: 14px; padding: 26px 28px;
+      box-shadow: 0 4px 24px rgba(36,31,92,.08);
+    }
+    .card h2 { font-size: 18px; margin: 0 0 6px; }
+    .card .hint { color: #7a768f; font-size: 13.5px; line-height: 1.5; margin-bottom: 18px; }
+    label { display: block; font-size: 13px; font-weight: 700; color: #4b3ad6; margin-bottom: 6px; }
+    input[type=text], textarea {
+      width: 100%; padding: 11px 13px; border: 2px solid #e6e3f5; border-radius: 9px;
+      font-size: 14.5px; font-family: inherit; margin-bottom: 16px;
+    }
+    textarea { min-height: 160px; resize: vertical; line-height: 1.6; }
+    input[type=text]:focus, textarea:focus { outline: none; border-color: #7c5cff; }
+    .submit-btn {
+      padding: 12px 26px; background: linear-gradient(135deg, #7c5cff, #4b3ad6); color: #fff;
+      border: none; border-radius: 9px; font-size: 15px; font-weight: 700; cursor: pointer;
+    }
+    .submit-btn:hover { filter: brightness(1.05); }
+    .error { color: #c0392b; font-size: 13.5px; margin-bottom: 14px; }
+    .new-link {
+      background: #f0edff; border: 1px solid #d9d0ff; border-radius: 10px; padding: 14px 16px;
+      margin-bottom: 18px; font-size: 13.5px;
+    }
+    .new-link strong { display: block; margin-bottom: 6px; color: #4b3ad6; }
+    .new-link code { display: block; word-break: break-all; color: #1b1730; }
+    .list { display: flex; flex-direction: column; gap: 12px; }
+    .item {
+      border: 1px solid #ece9fa; border-radius: 10px; padding: 14px 16px;
+    }
+    .item .title { font-weight: 700; font-size: 14.5px; margin-bottom: 4px; }
+    .item .meta { color: #9490a8; font-size: 12.5px; margin-bottom: 8px; }
+    .item .link-row { display: flex; gap: 8px; align-items: center; }
+    .item input[type=text] {
+      margin: 0; flex: 1; font-size: 12.5px; padding: 7px 10px; background: #faf9ff;
+    }
+    .copy-btn {
+      padding: 7px 14px; background: #ece9fa; color: #4b3ad6; border: none; border-radius: 7px;
+      font-size: 12.5px; font-weight: 700; cursor: pointer; white-space: nowrap;
+    }
+    .empty { color: #9490a8; font-size: 14px; padding: 12px 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="brand">✨ SparkMe Admin</span>
+    <nav>
+      <a href="{{ url_for('admin_home') }}">Stored interviews</a>
+      <a href="{{ url_for('admin_interviews') }}" class="active">Create interview</a>
+      <a href="{{ url_for('admin_logout') }}">Log out</a>
+    </nav>
+  </header>
+  <div class="wrap">
+    <div class="grid">
+      <div class="card">
+        <h2>Create a new interview</h2>
+        <p class="hint">Give it a title and list the questions you want asked, one per line. You'll get a link to send to anyone — they'll be interviewed on exactly these questions.</p>
+        {% if error %}<p class="error">{{ error }}</p>{% endif %}
+        {% if new_link %}
+        <div class="new-link">
+          <strong>Interview created — share this link:</strong>
+          <code>{{ new_link }}</code>
+        </div>
+        {% endif %}
+        <form method="POST">
+          <label for="title">Interview title</label>
+          <input type="text" id="title" name="title" placeholder="e.g. Remote work habits" required>
+          <label for="questions">Questions (one per line)</label>
+          <textarea id="questions" name="questions" placeholder="What does a typical workday look like for you?&#10;How has your team's communication changed recently?&#10;What's the hardest part of your role right now?" required></textarea>
+          <button type="submit" class="submit-btn">Create &amp; get link</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>Your interviews</h2>
+        <p class="hint">Every link below starts a fresh conversation for whoever opens it.</p>
+        {% if interviews %}
+        <div class="list">
+          {% for it in interviews %}
+          <div class="item">
+            <div class="title">{{ it.title }}</div>
+            <div class="meta">{{ it.questions|length }} question{{ '' if it.questions|length == 1 else 's' }}</div>
+            <div class="link-row">
+              <input type="text" readonly value="{{ it.link }}" onclick="this.select()">
+              <button class="copy-btn" onclick="copyLink(this, '{{ it.link }}')">Copy</button>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}
+        <p class="empty">No interviews created yet — use the form to make your first one.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  <script>
+    function copyLink(btn, link) {
+      navigator.clipboard.writeText(link).then(() => {
+        const original = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = original; }, 1500);
+      });
+    }
+  </script>
+</body>
+</html>

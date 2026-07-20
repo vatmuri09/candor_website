@@ -5,24 +5,30 @@
     <title>AI Interview Chat</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     <style>
+        body { align-items: flex-start; }
+        .chat-container h1 {
+            display: flex; align-items: center; gap: 8px;
+        }
         .instructions-panel {
-            background: #f5f5f5;
-            border: 1px solid #ddd;
-            border-radius: 8px;
-            padding: 20px;
-            margin-bottom: 20px;
+            background: #f7f6fd;
+            border: 1px solid #ece9fa;
+            border-radius: 12px;
+            padding: 18px 20px;
+            margin-bottom: 18px;
         }
         .instructions-panel h3 {
             margin-top: 0;
-            color: #333;
+            color: #4b3ad6;
+            font-size: 14px;
         }
         .instructions-panel ul {
-            margin: 10px 0;
+            margin: 10px 0 0;
             padding-left: 20px;
         }
         .instructions-panel li {
-            margin: 8px 0;
-            color: #666;
+            margin: 6px 0;
+            color: #4a4560;
+            font-size: 13.5px;
         }
         .control-panel {
             display: flex;
@@ -35,28 +41,33 @@
             display: flex;
             align-items: center;
             gap: 8px;
+            font-size: 13.5px;
+            color: #4a4560;
         }
         .toggle-switch input[type="checkbox"] {
             width: 40px;
             height: 20px;
             cursor: pointer;
+            accent-color: #7c5cff;
         }
         .toggle-switch label {
             cursor: pointer;
             user-select: none;
         }
         #end-session-btn {
-            background-color: #ff9800;
+            background: linear-gradient(135deg, #ff7a59, #e5533d);
             color: white;
-            padding: 12px 24px;
+            padding: 11px 22px;
             border: none;
-            border-radius: 4px;
+            border-radius: 9px;
             cursor: pointer;
-            font-size: 16px;
+            font-size: 14.5px;
+            font-weight: 700;
             margin-left: auto;
+            box-shadow: 0 4px 14px rgba(229, 83, 61, .3);
         }
         #end-session-btn:hover {
-            background-color: #f57c00;
+            filter: brightness(1.05);
         }
         @keyframes pulse {
             0%, 100% { opacity: 1; }
@@ -64,13 +75,14 @@
         }
         #status {
             margin-top: 10px;
-            color: #666;
+            color: #9490a8;
             font-style: italic;
+            font-size: 13.5px;
         }
         .tts-indicator {
             display: inline-block;
             margin-left: 5px;
-            color: #2196F3;
+            color: #7c5cff;
         }
         #chat-form {
             display: flex !important;
@@ -83,18 +95,21 @@
         #chat-input {
             flex: 1 !important;
             min-height: 42px;
-            padding: 10px;
+            padding: 10px 16px;
             border-radius: 18px;
-            border: 1px solid #ccc;
+            border: 2px solid #e6e3f5;
             resize: none;
             margin: 0 !important;
+            font-family: inherit;
+            font-size: 14.5px;
         }
+        #chat-input:focus { outline: none; border-color: #7c5cff; }
         #record-toggle {
             width: 40px !important;
             height: 40px !important;
             min-width: 40px !important;
             border-radius: 50%;
-            background: #eee;
+            background: #f1efff;
             display: flex !important;
             align-items: center !important;
             justify-content: center !important;
@@ -111,7 +126,7 @@
             min-width: 40px !important;
             border-radius: 50%;
             border: none;
-            background: #4CAF50;
+            background: linear-gradient(135deg, #7c5cff, #4b3ad6);
             color: white;
             font-size: 18px;
             cursor: pointer;
@@ -122,21 +137,23 @@
             position: static !important;
             flex-shrink: 0 !important;
             z-index: 1;
+            box-shadow: 0 4px 14px rgba(75, 58, 214, .3);
         }
         #record-toggle::before { content: "🎤"; font-size: 18px; }
         #record-toggle.recording::before { content: "⏹️"; }
         .chat-send:disabled {
-            background: #bdbdbd !important;
+            background: #d9d4ff !important;
+            box-shadow: none;
             cursor: not-allowed;
             opacity: 0.7;
         }
         #record-toggle:disabled {
-            background: #e0e0e0 !important;
+            background: #f1efff !important;
             cursor: not-allowed;
             opacity: 0.6;
         }
         #chat-input:disabled {
-            background: #f3f3f3;
+            background: #f7f6fd;
             cursor: not-allowed;
         }
     </style>
@@ -190,6 +207,8 @@
         let ttsEnabled = true;
         let isSessionCompleted = false;
         let pollingInterval = null;  // NEW: Track polling interval
+        let pollFailures = 0;            // consecutive failed polls
+        const POLL_FAILURE_LIMIT = 4;    // give up only after this many in a row
         let isInitializing = false;  // NEW: Prevent duplicate initialization
         const MIN_SESSION_DURATION_MS = 0;  // allow ending the session at any time
 
@@ -463,13 +482,24 @@
         // ===================================================================
         async function pollForMessages() {
             if (!sessionToken) return;
-            
+
             try {
                 const response = await fetch(`/api/get-messages?session_token=${sessionToken}`);
-                
+
+                // 503 = storage temporarily unavailable. Don't kill the session;
+                // just skip this tick and try again on the next one.
+                if (response.status === 503) {
+                    pollFailures = 0;
+                    return;
+                }
+
                 if (response.status === 400) {
-                    const err = await response.json();
-                    console.warn('Session invalid:', err);
+                    // A single failed poll can be a transient blip. Only give up
+                    // after several consecutive 400s so a hiccup doesn't end the
+                    // interview and bounce the participant home.
+                    pollFailures++;
+                    console.warn(`Session poll returned 400 (${pollFailures}/${POLL_FAILURE_LIMIT})`);
+                    if (pollFailures < POLL_FAILURE_LIMIT) return;
                     sessionToken = null;
                     clearInterval(pollingInterval);
                     pollingInterval = null;
@@ -479,8 +509,9 @@
                     return;
                 }
 
+                pollFailures = 0;
                 const data = await response.json();
-                
+
                 if (data.success && data.messages && data.messages.length > 0) {
                     data.messages.forEach(msg => {
                         if (msg.role === 'Interviewer' || msg.role === 'assistant') {

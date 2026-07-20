@@ -201,8 +201,22 @@ class BaseAgent:
                 tool_calls_xml = response[
                     tool_calls_start:tool_calls_end + len("</tool_calls>")
                 ]
-                
-                parsed_calls = parse_tool_calls(tool_calls_xml)
+
+                try:
+                    parsed_calls = parse_tool_calls(tool_calls_xml)
+                except Exception as parse_exc:
+                    # Cheap models (esp. gpt-4o-mini) sometimes emit malformed
+                    # XML (unclosed tags, stray '>'). Skipping the turn cleanly
+                    # is always better than crashing the containing coroutine.
+                    SessionLogger.log_to_file(
+                        "execution_log",
+                        f"({self.name}) parse_tool_calls failed: {parse_exc}. "
+                        f"Skipping this tool-call batch.",
+                        log_level="error"
+                    )
+                    if raise_error:
+                        raise
+                    return result
                 for call in parsed_calls:
                     try:
                         tool_name = call['tool_name']
@@ -243,8 +257,19 @@ class BaseAgent:
                 tool_calls_xml = response[
                     tool_calls_start:tool_calls_end + len("</tool_calls>")
                 ]
-                
-                parsed_calls = parse_tool_calls(tool_calls_xml)
+
+                try:
+                    parsed_calls = parse_tool_calls(tool_calls_xml)
+                except Exception as parse_exc:
+                    SessionLogger.log_to_file(
+                        "execution_log",
+                        f"({self.name}) parse_tool_calls failed: {parse_exc}. "
+                        f"Skipping this tool-call batch.",
+                        log_level="error"
+                    )
+                    if raise_error:
+                        raise
+                    return result
                 for call in parsed_calls:
                     try:
                         tool_name = call['tool_name']

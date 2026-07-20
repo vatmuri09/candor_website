@@ -215,3 +215,7 @@ __marimo__/
 # Local-disk session/context stores (dev only)
 data/_web_sessions/
 data/_topic_context/
+
+# Admin-created interviews (runtime-generated, not source)
+data/configs/_custom_interviews.json
+data/configs/custom_*.json

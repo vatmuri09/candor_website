@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% if title %}{{ title }} — SparkMe{% else %}Interview not found{% endif %}</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: radial-gradient(circle at 20% 20%, #7c5cff 0%, #4b3ad6 45%, #241f5c 100%);
+            min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px;
+        }
+        .container {
+            width: 100%; max-width: 560px; background: #fff; border-radius: 18px;
+            box-shadow: 0 24px 70px rgba(20,10,60,.35); padding: 44px 40px;
+        }
+        .eyebrow {
+            display: inline-block; background: #f0edff; color: #5b3df0; font-weight: 700;
+            font-size: 12.5px; letter-spacing: .04em; text-transform: uppercase;
+            padding: 5px 12px; border-radius: 999px; margin-bottom: 16px;
+        }
+        h1 { color: #1b1730; font-size: 28px; line-height: 1.3; margin-bottom: 10px; }
+        .subtitle { color: #666; font-size: 15.5px; line-height: 1.55; margin-bottom: 28px; }
+        .start-btn {
+            padding: 15px 34px; background: linear-gradient(135deg, #7c5cff, #4b3ad6); color: #fff;
+            border: none; border-radius: 10px; font-size: 17px; font-weight: 700; cursor: pointer;
+            transition: transform .15s, box-shadow .15s; box-shadow: 0 6px 20px rgba(75,58,214,.35);
+        }
+        .start-btn:hover:not(:disabled) { transform: translateY(-2px); }
+        .start-btn:disabled { opacity: .5; cursor: not-allowed; }
+        #status { display: block; margin-top: 14px; color: #888; font-size: 14px; }
+        .privacy { margin-top: 26px; font-size: 12.5px; color: #999; line-height: 1.5; }
+        .not-found { text-align: center; }
+        .not-found h1 { font-size: 22px; }
+
+        .modal-overlay {
+            display: none; position: fixed; inset: 0; background: rgba(20,20,35,.55);
+            align-items: center; justify-content: center; padding: 20px; z-index: 50;
+        }
+        .modal-overlay.show { display: flex; }
+        .modal {
+            width: 100%; max-width: 720px; max-height: 88vh; overflow-y: auto; background: #fff;
+            border-radius: 14px; box-shadow: 0 24px 70px rgba(0,0,0,.4); padding: 28px 30px;
+        }
+        .modal h2 { color: #1b1730; font-size: 22px; margin-bottom: 6px; }
+        .modal .modal-sub { color: #666; font-size: 14px; line-height: 1.5; margin-bottom: 18px; }
+        #context-text {
+            width: 100%; min-height: 220px; padding: 14px; border: 2px solid #e6e6ef;
+            border-radius: 10px; font-size: 14px; line-height: 1.55; font-family: inherit;
+            resize: vertical; color: #2d2d3a;
+        }
+        #context-text:focus { outline: none; border-color: #7c5cff; }
+        .modal-actions { margin-top: 24px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+        .btn-secondary {
+            padding: 12px 22px; background: #f0edff; color: #5b3df0; border: none; border-radius: 8px;
+            font-size: 15px; font-weight: 600; cursor: pointer;
+        }
+        #modal-status { color: #888; font-size: 13.5px; }
+    </style>
+</head>
+<body>
+    {% if title %}
+    <div class="container">
+        <span class="eyebrow">You've been invited</span>
+        <h1>{{ title }}</h1>
+        <p class="subtitle">You'll be talking with an AI interviewer that asks questions in your own words — there's no right answer, just be honest. It takes a few minutes.</p>
+        <button id="start-btn" class="start-btn">Begin interview →</button>
+        <span id="status"></span>
+        <p class="privacy">You don't need to share personally identifying information. Your responses may be recorded and stored for research and quality purposes.</p>
+    </div>
+
+    <div class="modal-overlay" id="context-modal">
+        <div class="modal">
+            <h2>Before we begin</h2>
+            <p class="modal-sub">Here's a bit of background the interviewer will keep in mind. Feel free to read it — you're ready to start whenever you like.</p>
+            <textarea id="context-text" spellcheck="false" readonly></textarea>
+            <div class="modal-actions">
+                <button id="approve-btn" class="start-btn">Start the interview →</button>
+                <span id="modal-status"></span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const token = {{ token|tojson }};
+        const startBtn = document.getElementById('start-btn');
+        const statusEl = document.getElementById('status');
+        const modal = document.getElementById('context-modal');
+        const contextText = document.getElementById('context-text');
+        const approveBtn = document.getElementById('approve-btn');
+        const modalStatus = document.getElementById('modal-status');
+        let pendingSession = null;
+
+        startBtn.addEventListener('click', async () => {
+            startBtn.disabled = true;
+            statusEl.textContent = 'Getting things ready…';
+            const existingUserId = localStorage.getItem('candor_user_id');
+            const payload = { conversation_type: 'link', link_token: token };
+            if (existingUserId) payload.user_id = existingUserId;
+            try {
+                const res = await fetch('/api/start-session', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (data.success) {
+                    localStorage.setItem('candor_user_id', data.user_id);
+                    pendingSession = { token: data.session_token, conversationType: 'link' };
+                    statusEl.textContent = '';
+                    contextText.value = (data.context && data.context.context) || '';
+                    modal.classList.add('show');
+                } else {
+                    statusEl.textContent = 'Could not start: ' + (data.error || 'unknown error');
+                    startBtn.disabled = false;
+                }
+            } catch (e) {
+                statusEl.textContent = 'Network error — please try again.';
+                startBtn.disabled = false;
+            }
+        });
+
+        approveBtn.addEventListener('click', async () => {
+            if (!pendingSession) return;
+            approveBtn.disabled = true;
+            modalStatus.textContent = 'Starting your interview…';
+            try {
+                const res = await fetch('/api/approve-context', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_token: pendingSession.token, context: contextText.value.trim() })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    sessionStorage.setItem('candor_session_token', pendingSession.token);
+                    sessionStorage.setItem('candor_conversation_type', pendingSession.conversationType);
+                    window.location.href = '/chat';
+                } else {
+                    modalStatus.textContent = 'Could not start: ' + (data.error || 'unknown error');
+                    approveBtn.disabled = false;
+                }
+            } catch (e) {
+                modalStatus.textContent = 'Network error — please try again.';
+                approveBtn.disabled = false;
+            }
+        });
+    </script>
+    {% else %}
+    <div class="container not-found">
+        <span class="eyebrow">Link not found</span>
+        <h1>This interview link isn't valid or has been removed.</h1>
+        <p class="subtitle">Double check the link, or ask whoever sent it to you for a new one.</p>
+    </div>
+    {% endif %}
+</body>
+</html>

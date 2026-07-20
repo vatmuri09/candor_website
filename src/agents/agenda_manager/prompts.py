@@ -382,18 +382,37 @@ UPDATE_SUBTOPIC_COVERAGE_INSTRUCTIONS = """
      * **Descriptive** → if it focuses on background, motivation, interest, reasoning, or conceptual understanding rather than a specific event.
 
 2. **Evaluate Completeness**
+   - A subtopic is NEVER covered on the strength of its first answer alone, no
+     matter how fluent that answer sounds. A single generic response (a claim
+     with no concrete example, story, tool name, number, or specific moment
+     attached) is NOT sufficient — that is exactly the shallow, checklist-style
+     interviewing this system exists to avoid.
+   - Before marking ANYTHING covered, check: does at least one note for this
+     subtopic contain a SPECIFIC, concrete detail (a named tool/person/place,
+     a number, a described moment or decision, a direct example)? If every
+     note is a generality ("I handle X", "I'm cautious about Y", "I focus on
+     Z") with no concrete instance behind it, the subtopic is NOT covered —
+     leave it open so the interviewer can probe the concrete noun.
    - For **STAR-appropriate** subtopics:
-       * Coverage requires STAR components:
-         - **Situation:** Context or background
-         - **Task:** Objective or responsibility
-         - **Action:** Steps taken or reasoning
-         - **Result:** Outcome, metric, or reflection
-       * Fully covered when almost all components are clearly present and coherent.
-       * However, if notes is already comprehensive, feel free to mark it as covered as there are more important subtopics to be covered in later section.
+       * Coverage requires STAR components, each grounded in a specific
+         instance, not a general description of the role:
+         - **Situation:** A specific context or example, not "in general..."
+         - **Task:** The concrete objective in that instance
+         - **Action:** The actual steps taken, named specifically
+         - **Result:** A real outcome, metric, or specific reflection
+       * Fully covered only when most components are present AND at least one
+         is grounded in a concrete example rather than a paraphrase of the
+         question.
    - For **Descriptive** subtopics:
-       * Coverage requires comprehensive factual, reflective, or conceptual detail.
-       * Fully covered when the main question or theme is explained with sufficient clarity, logic, and completeness (even if not quantifiable).
-       * However, if notes is already comprehensive, feel free to mark it as covered as there are more important subtopics to be covered in later section.
+       * Coverage requires the theme explained with a concrete anchor — a
+         named example, a specific instance, a number — not just a fluent
+         general statement.
+       * A subtopic answered only in generalities stays open even if the
+         prose "sounds complete."
+   - It is expected and CORRECT for a subtopic to stay open across multiple
+     turns while the interviewer drills into one concrete detail. Do not mark
+     it covered just to make room for "more important subtopics later" — depth
+     on fewer subtopics is more valuable than shallow coverage of many.
 
 3. **Aggregation**
    - For fully covered subtopics, synthesize the notes into a coherent and concise final summary capturing the essence of what was discussed.

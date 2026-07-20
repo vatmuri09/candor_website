@@ -1,5 +1,6 @@
 from typing import Type, Optional, List, Callable, Dict, Any, Union
 import json
+import re
 
 
 from langchain_core.callbacks.manager import CallbackManagerForToolRun
@@ -8,6 +9,60 @@ from pydantic import BaseModel, Field, SkipValidation, field_validator
 
 from src.content.memory_bank.memory_bank_base import MemoryBankBase, Memory
 from src.content.session_agenda.session_agenda import SessionAgenda
+
+
+# Code-enforced gate for UpdateSubtopicCoverage: a subtopic's aggregated_notes must
+# contain SOME concrete-detail signal before it can be marked covered. This is a
+# deliberately cheap, permissive heuristic (regex, no LLM call) — it exists to catch
+# the worst case (notes that are pure generalities with zero specifics), not to
+# perfectly judge depth. It replaces relying solely on the coverage prompt's prose
+# instructions, which the model can silently ignore.
+_DIGIT_RE = re.compile(r"\d")
+# Double-quote/backtick only — a plain apostrophe (contractions, possessives like
+# "AI's") is NOT a quote delimiter and must not trigger this.
+_QUOTED_RE = re.compile(r"[\"`][^\"`]{2,60}[\"`]")
+_CAP_WORD_RE = re.compile(r"\b[A-Z][a-zA-Z]{2,}\b")
+# Word-form quantities ("a decade", "three years", "a couple of times") that a pure
+# digit check misses.
+_WORD_NUMBER_RE = re.compile(
+    r"\b(a|one|two|three|four|five|six|seven|eight|nine|ten|dozen|couple|few|"
+    r"several)\s+(day|week|month|year|decade|time|hour|minute)s?\b",
+    re.IGNORECASE,
+)
+# Phrases that mark a respondent is recounting one specific instance, not a
+# generality — even without a proper noun or number attached.
+_SPECIFIC_INSTANCE_RE = re.compile(
+    r"\b(for example|for instance|specifically|one time|a time when|there was a|"
+    r"once when|in one case|one case where|a case where|the time when|recently "
+    r"when|an instance where|i once|once,|once i|had to once)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_concrete_detail(text: str) -> bool:
+    """True if aggregated_notes contains a number, a quoted term, a proper-noun-like
+    capitalized word not at the very start of a sentence (a named tool/place/thing),
+    a word-form quantity, or language marking one specific recounted instance."""
+    if not text:
+        return False
+    if _DIGIT_RE.search(text):
+        return True
+    if _QUOTED_RE.search(text):
+        return True
+    if _WORD_NUMBER_RE.search(text):
+        return True
+    if _SPECIFIC_INSTANCE_RE.search(text):
+        return True
+    for m in _CAP_WORD_RE.finditer(text):
+        start = m.start()
+        if start == 0:
+            continue
+        preceding = text[:start]
+        # Skip capitals that are just the first word of a sentence.
+        if re.search(r"[.!?]\s*$", preceding):
+            continue
+        return True
+    return False
 
 
 class UpdateSessionNoteInput(BaseModel):
@@ -220,11 +275,19 @@ class UpdateSubtopicCoverage(BaseTool):
         aggregated_notes: str,
         run_manager: Optional[CallbackManagerForToolRun] = None,
     ) -> str:
+        if not _has_concrete_detail(aggregated_notes):
+            raise ToolException(
+                f"Refusing to mark subtopic {subtopic_id} covered: aggregated_notes "
+                "contains no concrete detail (no number, no quoted term, no named "
+                "tool/place/thing) — it reads as a generality. Keep this subtopic "
+                "open and ask a follow-up that gets a specific example, then retry "
+                "with notes that include it."
+            )
         try:
             # Ensure metadata is a valid dict, default to empty if not
             self.session_agenda.update_subtopic_coverage(subtopic_id=str(subtopic_id),
                                                          aggregated_notes=str(aggregated_notes))
-                
+
             return f"Successfully updated the coverage for subtopic ID: {subtopic_id}"
         except Exception as e:
             raise ToolException(f"Error updating subtopic coverage: {e}")
