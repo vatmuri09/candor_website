@@ -18,6 +18,14 @@
     .User { background: #f0fdf4; }
     .role { font-weight: 600; font-size: 12px; color: #6b7280; }
     li { font-size: 14px; margin-bottom: 4px; }
+    .stat-row { display: flex; flex-wrap: wrap; gap: 8px; }
+    .stat { background: #f4f4f5; border-radius: 6px; padding: 6px 10px; font-size: 12.5px; }
+    .stat b { font-variant-numeric: tabular-nums; }
+    .stat.nonzero { background: #fef3c7; color: #92400e; }
+    .stat.severe { background: #fee2e2; color: #b91c1c; }
+    .subhead { font-size: 12px; font-weight: 700; text-transform: uppercase; color: #6b7280;
+               margin: 14px 0 6px; letter-spacing: .03em; }
+    .subhead:first-child { margin-top: 0; }
   </style>
 </head>
 <body>
@@ -33,6 +41,56 @@
         Recorded: {{ session.created_at }}
       </div>
     </div>
+
+    {% if session.guardrail_stats or session.probe_quality_stats or session.engagement_stats %}
+    <div class="card">
+      <h2>Quality signals</h2>
+
+      {% if session.guardrail_stats %}
+      <div class="subhead">Interviewer guardrails (times each fired)</div>
+      <div class="stat-row">
+        {% for key, count in session.guardrail_stats.items() %}
+          {% if count %}
+          <span class="stat {{ 'severe' if key.endswith('_failed') else 'nonzero' }}">{{ key }}: <b>{{ count }}</b></span>
+          {% endif %}
+        {% endfor %}
+        {% if not (session.guardrail_stats.values() | select | list) %}
+          <span class="stat">no guardrails fired</span>
+        {% endif %}
+      </div>
+      {% endif %}
+
+      {% if session.probe_quality_stats %}
+      <div class="subhead">Depth probing</div>
+      <div class="stat-row">
+        <span class="stat">turns scored: <b>{{ session.probe_quality_stats.turns_scored }}</b></span>
+        <span class="stat">turns with a why/example/number/contrast ask: <b>{{ session.probe_quality_stats.has_depth_cue }}</b></span>
+        <span class="stat {{ 'severe' if session.probe_quality_stats.flat_streaks_flagged else '' }}">
+          flat streaks (4+ turns with no depth cue): <b>{{ session.probe_quality_stats.flat_streaks_flagged }}</b></span>
+      </div>
+      {% endif %}
+
+      {% if session.engagement_stats %}
+      <div class="subhead">Respondent engagement</div>
+      <div class="stat-row">
+        <span class="stat">turns observed: <b>{{ session.engagement_stats.turns_observed }}</b></span>
+        <span class="stat">final disengagement streak: <b>{{ session.engagement_stats.final_streak }}</b></span>
+        <span class="stat">mean sentiment: <b>{{ session.engagement_stats.mean_sentiment }}</b></span>
+        <span class="stat">min sentiment: <b>{{ session.engagement_stats.min_sentiment }}</b></span>
+      </div>
+      {% endif %}
+
+      {% if session.closer_stats %}
+      <div class="subhead">Conversation closer</div>
+      <div class="stat-row">
+        <span class="stat">close offers: <b>{{ session.closer_stats.close_offers }}</b></span>
+        <span class="stat">pivots (continued past an offer): <b>{{ session.closer_stats.pivots }}</b></span>
+        <span class="stat">quality-collapse endings: <b>{{ session.closer_stats.quality_collapse_ends }}</b></span>
+        <span class="stat">final state: <b>{{ session.closer_stats.final_state }}</b></span>
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
 
     <div class="card">
       <h2>Transcript</h2>

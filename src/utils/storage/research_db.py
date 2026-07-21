@@ -88,6 +88,11 @@ _DDL = [
         UNIQUE (user_id, session_id)
     )
     """,
+    # Additive: interview_sessions predates the guardrail/probe-quality admin
+    # surfacing (SPEC.md priority #4). ADD COLUMN IF NOT EXISTS so this runs
+    # safely against a table that already exists from before these columns.
+    "ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS guardrail_stats JSONB",
+    "ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS probe_quality_stats JSONB",
     """
     CREATE TABLE IF NOT EXISTS likert_responses (
         id             BIGSERIAL PRIMARY KEY,
@@ -175,6 +180,7 @@ def record_session(user_id: str, session_id, *, conversation_type: str = None,
                    ended_at: datetime = None, num_user_turns: int = None,
                    num_interviewer_turns: int = None, end_reason: str = None,
                    engagement_stats: dict = None, closer_stats: dict = None,
+                   guardrail_stats: dict = None, probe_quality_stats: dict = None,
                    context_bias: list = None, transcript: list = None,
                    archive_url: str = None) -> None:
     """Upsert one session's metadata. Best-effort; never raises."""
@@ -187,11 +193,13 @@ def record_session(user_id: str, session_id, *, conversation_type: str = None,
             INSERT INTO interview_sessions
                 (user_id, session_id, conversation_type, topic, started_at, ended_at,
                  num_user_turns, num_interviewer_turns, end_reason,
-                 engagement_stats, closer_stats, context_bias, transcript, archive_url)
+                 engagement_stats, closer_stats, guardrail_stats, probe_quality_stats,
+                 context_bias, transcript, archive_url)
             VALUES
                 (:user_id, :session_id, :conversation_type, :topic, :started_at, :ended_at,
                  :num_user_turns, :num_interviewer_turns, :end_reason,
                  CAST(:engagement_stats AS JSONB), CAST(:closer_stats AS JSONB),
+                 CAST(:guardrail_stats AS JSONB), CAST(:probe_quality_stats AS JSONB),
                  CAST(:context_bias AS JSONB), CAST(:transcript AS JSONB), :archive_url)
             ON CONFLICT (user_id, session_id) DO UPDATE SET
                 conversation_type = EXCLUDED.conversation_type,
@@ -203,6 +211,8 @@ def record_session(user_id: str, session_id, *, conversation_type: str = None,
                 end_reason = EXCLUDED.end_reason,
                 engagement_stats = EXCLUDED.engagement_stats,
                 closer_stats = EXCLUDED.closer_stats,
+                guardrail_stats = EXCLUDED.guardrail_stats,
+                probe_quality_stats = EXCLUDED.probe_quality_stats,
                 context_bias = EXCLUDED.context_bias,
                 transcript = EXCLUDED.transcript,
                 archive_url = EXCLUDED.archive_url
@@ -217,6 +227,8 @@ def record_session(user_id: str, session_id, *, conversation_type: str = None,
                 "end_reason": end_reason,
                 "engagement_stats": json.dumps(engagement_stats) if engagement_stats is not None else None,
                 "closer_stats": json.dumps(closer_stats) if closer_stats is not None else None,
+                "guardrail_stats": json.dumps(guardrail_stats) if guardrail_stats is not None else None,
+                "probe_quality_stats": json.dumps(probe_quality_stats) if probe_quality_stats is not None else None,
                 "context_bias": json.dumps(context_bias) if context_bias is not None else None,
                 "transcript": json.dumps(transcript) if transcript is not None else None,
                 "archive_url": archive_url,
@@ -373,7 +385,8 @@ def list_sessions(limit: int = 200) -> list:
         with engine.begin() as conn:
             rows = conn.execute(text("""
                 SELECT id, user_id, session_id, conversation_type, topic,
-                       num_user_turns, end_reason, created_at
+                       num_user_turns, end_reason, created_at,
+                       guardrail_stats, probe_quality_stats
                 FROM interview_sessions
                 ORDER BY created_at DESC
                 LIMIT :lim

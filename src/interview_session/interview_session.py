@@ -14,6 +14,7 @@ from src.agents.interviewer.interviewer import Interviewer, InterviewerConfig, T
 from src.agents.agenda_manager.agenda_manager import AgendaManager, AgendaManagerConfig
 from src.agents.exploration_planner.exploration_planner import ExplorationPlanner, ExplorationPlannerConfig
 from src.agents.engagement.engagement_monitor import EngagementMonitor
+from src.agents.engagement.probe_quality_monitor import ProbeQualityMonitor
 from src.agents.conversation_closer.conversation_closer import ConversationCloser
 from src.agents.context.context_research import ContextResearchAgent, ContextResearchResult
 from src.agents.user.user_agent import UserAgent
@@ -235,6 +236,11 @@ class InterviewSession:
         self.engagement_monitor = EngagementMonitor(
             config=monitor_cfg, interview_session=self
         )
+        # Rule-based, no-LLM-call depth-probing signal (SPEC.md priority #3):
+        # flags a streak of interviewer turns that never push for a reason,
+        # concrete example, number, or contrast. Read by admin surfacing only;
+        # does not steer the interviewer.
+        self.probe_quality_monitor = ProbeQualityMonitor()
         self.conversation_closer = ConversationCloser(
             topic_name=self._interview_description,
             interview_session=self,
@@ -575,6 +581,7 @@ class InterviewSession:
                 "guardrail_stats": interviewer.guardrail_stats,
                 "pending_directive_note": interviewer._pending_directive_note,
             },
+            "probe_quality_monitor": self.probe_quality_monitor.to_state(),
         }
 
     def load_state(self, state: dict) -> None:
@@ -614,6 +621,8 @@ class InterviewSession:
         self._interviewer.guardrail_stats = itv.get("guardrail_stats",
                                                      self._interviewer.guardrail_stats)
         self._interviewer._pending_directive_note = itv.get("pending_directive_note", "")
+
+        self.probe_quality_monitor.load_state(state.get("probe_quality_monitor"))
 
     def save_files(self) -> None:
         """Persist the FAISS banks, agenda and strategic state to disk."""

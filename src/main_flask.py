@@ -335,6 +335,8 @@ def record_session_metadata(session, meta) -> None:
         return
     monitor = getattr(session, 'engagement_monitor', None)
     closer = getattr(session, 'conversation_closer', None)
+    interviewer = getattr(session, '_interviewer', None)
+    probe_monitor = getattr(session, 'probe_quality_monitor', None)
     chat = getattr(session, 'chat_history', []) or []
     num_user = len([m for m in chat if getattr(m, 'role', None) == 'User'])
     num_interviewer = len([m for m in chat if getattr(m, 'role', None) == 'Interviewer'])
@@ -348,6 +350,8 @@ def record_session_metadata(session, meta) -> None:
         end_reason=getattr(closer, 'state', None),
         engagement_stats=monitor.stats() if monitor is not None else None,
         closer_stats=closer.stats() if closer is not None else None,
+        guardrail_stats=getattr(interviewer, 'guardrail_stats', None),
+        probe_quality_stats=probe_monitor.stats if probe_monitor is not None else None,
         # NOTE: the DB column is still named context_bias; we now record the
         # researched/approved background context there.
         context_bias=([getattr(session, 'retrieved_context')]
@@ -606,8 +610,14 @@ def _load_battery() -> dict:
     global _BATTERY_CACHE
     if _BATTERY_CACHE is not None:
         return _BATTERY_CACHE
-    path = os.getenv('LIKERT_BATTERY_PATH',
-                     os.path.join(os.getenv('DATA_DIR', 'data'), 'configs', 'likert_battery.json'))
+    # Must fall back to the bundled repo path like _config_path does: on
+    # Vercel, DATA_DIR is /tmp/... (read/write but ephemeral) and nothing ever
+    # writes likert_battery.json there — the file only ships in the deployed,
+    # read-only repo bundle at data/configs/likert_battery.json. Using
+    # DATA_DIR directly (with no fallback) silently produced an empty battery
+    # in production, so the survey never rendered (showSurvey() treats zero
+    # items as "no survey" and skips straight to finishAfterSurvey()).
+    path = os.getenv('LIKERT_BATTERY_PATH', _config_path('likert_battery.json'))
     try:
         with open(path, 'r', encoding='utf-8') as f:
             _BATTERY_CACHE = json.load(f)
@@ -714,10 +724,39 @@ def admin_logout():
     return redirect(url_for('admin_login'))
 
 
+# Guardrail counters whose non-zero presence means a regeneration attempt
+# could not fix the problem (the respondent-facing turn still tripped it).
+_SEVERE_GUARDRAIL_KEYS = (
+    "regeneration_failed", "near_duplicate_regen_failed", "depth_cap_regen_failed",
+)
+# Counters that mean *something* fired but was successfully corrected.
+_FLAGGED_GUARDRAIL_KEYS = (
+    "affirmation", "closing", "midsentence_service", "stance", "advice", "no_question",
+    "near_duplicate", "depth_cap_triggered", "repeated_leadin",
+)
+
+
+def _worst_severity(guardrail_stats: Optional[dict], probe_quality_stats: Optional[dict]) -> str:
+    """One-word severity label for the admin session list (SPEC.md priority #4)."""
+    guardrail_stats = guardrail_stats or {}
+    probe_quality_stats = probe_quality_stats or {}
+    if any(guardrail_stats.get(k, 0) for k in _SEVERE_GUARDRAIL_KEYS):
+        return "severe"
+    if probe_quality_stats.get("flat_streaks_flagged", 0):
+        return "flat-probing"
+    if any(guardrail_stats.get(k, 0) for k in _FLAGGED_GUARDRAIL_KEYS):
+        return "flagged"
+    if not guardrail_stats and not probe_quality_stats:
+        return "unknown"
+    return "clean"
+
+
 @app.route('/admin')
 @admin_required
 def admin_home():
     sessions = research_db.list_sessions()
+    for s in sessions:
+        s["severity"] = _worst_severity(s.get("guardrail_stats"), s.get("probe_quality_stats"))
     return render_template('admin.html', sessions=sessions)
 
 

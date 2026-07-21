@@ -251,6 +251,13 @@ class Interviewer(BaseAgent, Participant):
         self._last_subtopic_id = sid
         self._last_leadin_label = _leadin_label(clean)
 
+        # Depth-probing signal (SPEC.md priority #3): admin-surfacing only,
+        # never steers the interviewer. Guarded for eval harnesses that don't
+        # wire a probe_quality_monitor (e.g. baseline runs).
+        probe_monitor = getattr(self.interview_session, "probe_quality_monitor", None)
+        if probe_monitor is not None:
+            probe_monitor.observe(clean)
+
         return clean
 
     async def _enforce_non_affirming(self, response: str, cap_was_active: bool = False) -> str:
