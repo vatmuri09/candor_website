@@ -580,6 +580,18 @@ class InterviewSession:
             "interviewer": {
                 "guardrail_stats": interviewer.guardrail_stats,
                 "pending_directive_note": interviewer._pending_directive_note,
+                # Depth-cap / repeated-lead-in tracking. Without these, a fresh
+                # InterviewSession rebuilt on the next web turn (see session_store)
+                # starts back at streak=0 every time, so the same-subtopic depth
+                # cap can never accumulate past 1 turn in production — confirmed
+                # live: a session drilled 6 consecutive turns into one subtopic
+                # (a grocery-trip anecdote down to "how did you use oregano") with
+                # zero depth_cap_triggered fires, because this state was silently
+                # discarded and rebuilt as 0/""/[]/None on every single turn.
+                "same_subtopic_streak": interviewer._same_subtopic_streak,
+                "last_subtopic_id": interviewer._last_subtopic_id,
+                "streak_question_texts": interviewer._streak_question_texts,
+                "last_leadin_label": interviewer._last_leadin_label,
             },
             "probe_quality_monitor": self.probe_quality_monitor.to_state(),
         }
@@ -621,6 +633,10 @@ class InterviewSession:
         self._interviewer.guardrail_stats = itv.get("guardrail_stats",
                                                      self._interviewer.guardrail_stats)
         self._interviewer._pending_directive_note = itv.get("pending_directive_note", "")
+        self._interviewer._same_subtopic_streak = itv.get("same_subtopic_streak", 0)
+        self._interviewer._last_subtopic_id = itv.get("last_subtopic_id", "")
+        self._interviewer._streak_question_texts = itv.get("streak_question_texts", [])
+        self._interviewer._last_leadin_label = itv.get("last_leadin_label")
 
         self.probe_quality_monitor.load_state(state.get("probe_quality_monitor"))
 
